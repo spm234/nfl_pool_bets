@@ -27,6 +27,17 @@ def _seed(conn):
     importer.import_standings(conn, 2026, 1, "Always Hot, 350\n")
 
 
+def test_log_table_pending_pick_renders_dash_not_double_escaped(conn):
+    # SPM has an assignment but no recorded pick/bet yet (pending) — the
+    # em-dash placeholder must render as an actual entity, not literal
+    # "&mdash;" text from being passed through html.escape() twice.
+    _seed(conn)
+    cfg = PoolConfig.load(conn)
+    out = render_report_html(conn, cfg, season=2026, week=1)
+    assert "&amp;mdash;" not in out
+    assert "&mdash;" in out
+
+
 def test_render_report_no_args_does_not_crash(conn):
     cfg = PoolConfig.load(conn)
     out = render_report_html(conn, cfg)
@@ -100,8 +111,11 @@ def test_scenario_projector_respects_no_field_names(conn):
     assert '"name": "Always Hot"' not in out
 
 
-def test_scenario_projector_absent_without_week(conn):
+def test_scenario_projector_tab_shows_placeholder_without_week(conn):
+    # The tab itself is always present (it's a nav button, not conditional
+    # content) — without a season/week there's just nothing to project yet.
     _seed(conn)
     cfg = PoolConfig.load(conn)
     out = render_report_html(conn, cfg)
-    assert "Scenario Projector" not in out
+    assert "No assignments logged for this week yet" in out
+    assert '"name": "SPM"' not in out

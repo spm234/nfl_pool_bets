@@ -36,12 +36,24 @@ _STYLE = """
   --win:#6fcf8e; --loss:#e2645a; --push:#6ea8d8;
 }
 *{box-sizing:border-box;}
-body{
-  margin:0; background:var(--turf); color:var(--chalk);
-  font-family:'Public Sans',system-ui,-apple-system,sans-serif;
-  padding:36px 20px 70px;
+body{margin:0; background:var(--turf); color:var(--chalk); font-family:'Public Sans',system-ui,-apple-system,sans-serif;}
+#app{display:flex; min-height:100vh;}
+nav{
+  width:224px; flex-shrink:0; background:var(--turf-raised);
+  border-right:1px solid var(--line); padding:26px 0; display:flex; flex-direction:column;
 }
-.wrap{max-width:900px;margin:0 auto;}
+.brand{padding:0 20px 18px; border-bottom:1px solid var(--line); margin-bottom:8px;}
+.brand-title{font-family:'Big Shoulders Display',sans-serif; font-weight:800; font-size:21px; margin:0; line-height:1.15;}
+.tab-btn{
+  text-align:left; background:none; border:none; color:var(--chalk-dim);
+  padding:12px 20px; font-size:14px; cursor:pointer; font-family:'Public Sans',sans-serif;
+  border-left:3px solid transparent; width:100%;
+}
+.tab-btn:hover{color:var(--chalk); background:rgba(255,255,255,.03);}
+.tab-btn.active{color:var(--amber); border-left-color:var(--amber); background:rgba(242,163,61,.06); font-weight:600;}
+.nav-foot{margin-top:auto; padding:16px 20px 0; border-top:1px solid var(--line);}
+main{flex:1; min-width:0; padding:36px 40px 70px; max-width:960px;}
+[data-tabcontent][hidden]{display:none;}
 .mono{font-family:'IBM Plex Mono',ui-monospace,monospace; font-variant-numeric:tabular-nums;}
 .eyebrow{
   font-family:'IBM Plex Mono',monospace; font-size:11px; letter-spacing:.14em;
@@ -49,7 +61,7 @@ body{
 }
 h1{
   font-family:'Big Shoulders Display',sans-serif; font-weight:800;
-  font-size:38px; line-height:1; margin:0 0 6px; text-wrap:balance;
+  font-size:34px; line-height:1; margin:0 0 6px; text-wrap:balance;
   letter-spacing:.01em;
 }
 h2{
@@ -149,10 +161,22 @@ footer{
   font-family:'IBM Plex Mono',monospace; font-size:11.5px; color:var(--chalk-dim); line-height:1.7;
 }
 footer b{color:var(--chalk);}
+@media (max-width:760px){
+  #app{flex-direction:column;}
+  nav{
+    width:100%; flex-direction:row; align-items:center; padding:12px;
+    border-right:none; border-bottom:1px solid var(--line); overflow-x:auto;
+  }
+  .brand{border-bottom:none; border-right:1px solid var(--line); padding:0 14px 0 0; margin:0 6px 0 0; flex-shrink:0;}
+  .tab-btn{border-left:none; border-bottom:3px solid transparent; padding:8px 14px; width:auto; white-space:nowrap;}
+  .tab-btn.active{border-left-color:transparent; border-bottom-color:var(--amber);}
+  .nav-foot{display:none;}
+  main{padding:22px 18px 50px;}
+}
 @media (max-width:520px){
   .slip{grid-template-columns:1fr;}
   .slip-divider{border-left:none; border-top:1px dashed var(--line); margin:10px 0;}
-  h1{font-size:30px;}
+  h1{font-size:28px;}
 }
 """
 
@@ -223,10 +247,11 @@ def _log_table(tl) -> str:
             after_cls = "neg"
         after = f"{r.points_after:g}" if r.points_after is not None else "&mdash;"
         bet = f"{r.bet:g}" if r.bet is not None else "&mdash;"
+        pick = _esc(r.pick) if r.pick else "&mdash;"
         rows.append(
             f"<tr><td>{r.week_number}</td>"
             f"<td class='mono'>{_esc(r.away_team)} @ {_esc(r.home_team)}</td>"
-            f"<td>{_esc(r.assigned_side)}</td><td>{_esc(r.pick or '&mdash;')}</td>"
+            f"<td>{_esc(r.assigned_side)}</td><td>{pick}</td>"
             f"<td class='mono'>{bet}</td>"
             f"<td>{status}</td><td class='mono {after_cls}'>{after}</td></tr>"
         )
@@ -307,11 +332,7 @@ def _scenario_table(conn, cfg, entry_id, start_points, weeks_remaining, field_si
     )
 
 
-def _entry_sections(
-    conn: sqlite3.Connection, cfg: PoolConfig, season: Optional[int], week: Optional[int]
-) -> tuple[str, dict]:
-    entries = _entries(conn)
-    timelines = {}
+def _field_size_and_weeks_remaining(conn, cfg, season, week):
     field_count_row = conn.execute(
         """
         SELECT COUNT(DISTINCT entry_id) AS n FROM entry_week_points ewp
@@ -321,6 +342,19 @@ def _entry_sections(
     ).fetchone() if season else None
     field_size = max((field_count_row["n"] or 0) if field_count_row else 0, cfg.default_field_size)
     weeks_remaining = max(1, 18 - (week or 1))
+    return field_size, weeks_remaining
+
+
+def _entry_sections(
+    conn: sqlite3.Connection, cfg: PoolConfig, season: Optional[int], week: Optional[int]
+) -> tuple[str, dict]:
+    """'My Entries' tab: game log + this week's pick, one block per entry.
+    The Monte Carlo scenario comparison lives in its own Simulation tab
+    now (see _simulation_tab_content) rather than repeated per entry here.
+    """
+    entries = _entries(conn)
+    timelines = {}
+    field_size, weeks_remaining = _field_size_and_weeks_remaining(conn, cfg, season, week)
 
     blocks = []
     for e in entries:
@@ -356,13 +390,34 @@ def _entry_sections(
                     f'<div class="card"><p class="card-title">This week&rsquo;s pick</p>'
                     f'<p class="empty-note">No assignment logged for week {week} yet.</p></div>'
                 )
-            section.append(
-                _scenario_table(conn, cfg, e["id"], tl.current_points, weeks_remaining, field_size)
-            )
         section.append("</section>")
         blocks.append("".join(section))
 
     return "".join(blocks), timelines
+
+
+def _simulation_tab_content(
+    conn: sqlite3.Connection, cfg: PoolConfig, season: Optional[int], week: Optional[int]
+) -> str:
+    """Simulation tab: the Monte Carlo scenario-lab comparison for all 3
+    entries together, instead of scattered one-per-entry inside 'My Entries'.
+    """
+    entries = _entries(conn)
+    if not entries:
+        return '<p class="empty-note">No entries yet.</p>'
+    field_size, weeks_remaining = _field_size_and_weeks_remaining(conn, cfg, season, week)
+
+    blocks = []
+    for e in entries:
+        tl = compute_my_entry_timeline(conn, e["id"], cfg)
+        blocks.append(
+            f'<h3 style="font-size:15px;margin:0 0 8px;color:var(--chalk-dim)">{_esc(e["display_name"])}'
+            f'<span class="mono" style="margin-left:8px">{tl.current_points:g} pts</span></h3>'
+        )
+        blocks.append(
+            _scenario_table(conn, cfg, e["id"], tl.current_points, weeks_remaining, field_size)
+        )
+    return "".join(blocks)
 
 
 def _scenario_projector_section(
@@ -566,7 +621,6 @@ def _scenario_projector_section(
 """
 
     return (
-        '<section class="entry-section"><h2>Scenario Projector</h2>'
         '<div class="card"><p class="card-title">Assumptions</p>'
         '<div id="scenarioGames"></div>'
         '<div class="scenario-row"><span class="game-label">Field bet % (of current stack)</span>'
@@ -581,7 +635,7 @@ def _scenario_projector_section(
         '<div class="card"><p class="card-title">Projected standings</p>'
         '<div class="table-scroll"><table id="scenarioTable"><thead><tr><th>#</th><th>Entry</th>'
         "<th>Entering</th><th>Projected</th><th>&Delta;</th></tr></thead><tbody></tbody></table></div>"
-        "</div></section>"
+        "</div>"
         f'<script type="application/json" id="scenario-data">{payload_json}</script>'
         f"<script>{js}</script>"
     )
@@ -599,24 +653,22 @@ def _field_summary_section(
     if include_field_names:
         rows = compute_field_reconstruction(conn, season, week, cfg)
         if not rows:
-            return (
-                f'<section><h2>Field &mdash; week {week}</h2>'
-                f'<p class="empty-note">No field data for week {week}.</p></section>'
-            )
+            return f'<p class="empty-note">No field data for week {week}.</p>'
         trs = []
         for r in rows:
-            cands = ", ".join(f"{c.pick} {c.bet}" for c in r.candidates) or "&mdash;"
+            cands_raw = ", ".join(f"{c.pick} {c.bet}" for c in r.candidates)
+            cands = _esc(cands_raw) if cands_raw else "&mdash;"
             trs.append(
                 f"<tr><td>{_esc(r.entry_name)}</td><td class='mono'>{_esc(r.away_team)}@{_esc(r.home_team)}</td>"
                 f"<td class='mono'>{r.prev_points if r.prev_points is not None else '&mdash;'}</td>"
                 f"<td class='mono'>{r.current_points if r.current_points is not None else '&mdash;'}</td>"
-                f"<td class='mono'>{r.delta if r.delta is not None else '&mdash;'}</td><td>{_esc(cands)}</td></tr>"
+                f"<td class='mono'>{r.delta if r.delta is not None else '&mdash;'}</td><td>{cands}</td></tr>"
             )
         return (
-            f'<section><h2>Field &mdash; week {week}</h2><div class="card">'
+            '<div class="card">'
             '<div class="table-scroll"><table><thead><tr><th>Entry</th><th>Game</th>'
             f"<th>Prev</th><th>Cur</th><th>&Delta;</th><th>Likely bet</th></tr></thead>"
-            f"<tbody>{''.join(trs)}</tbody></table></div></div></section>"
+            f"<tbody>{''.join(trs)}</tbody></table></div></div>"
         )
 
     week_row = conn.execute(
@@ -632,13 +684,22 @@ def _field_summary_section(
         (week_row["id"],),
     ).fetchone()["n"]
     return (
-        f'<section><h2>Field &mdash; week {week}</h2><div class="stat-row">'
+        '<div class="stat-row">'
         f'<div class="stat-tile"><div class="n">{total}</div><div class="l">Entries tracked</div></div>'
         f'<div class="stat-tile"><div class="n">{eliminated}</div><div class="l">Eliminated</div></div>'
         "</div>"
         '<p class="empty-note" style="margin-top:10px">Individual field-entry names/points omitted '
-        "(--no-field-names) &mdash; rerun without that flag for the full per-entry breakdown.</p></section>"
+        "(--no-field-names) &mdash; rerun without that flag for the full per-entry breakdown.</p>"
     )
+
+
+_TABS = [
+    ("overview", "Overview"),
+    ("entries", "My Entries"),
+    ("field", "Field"),
+    ("projector", "Scenario Projector"),
+    ("simulation", "Simulation"),
+]
 
 
 def render_report_html(
@@ -650,22 +711,70 @@ def render_report_html(
     include_field_names: bool = True,
 ) -> str:
     generated_at = datetime.now(timezone.utc).strftime("%b %d, %Y &middot; %H:%M UTC")
-    heading = f"Week {week} Scoreboard" if week else "Season Overview"
-    meta = f"Season {season} &middot; " if season else ""
+    week_label = f"Week {week}" if week else "No active week set"
+    meta = f"Season {season} &middot; {week_label}" if season else week_label
 
     entry_blocks, timelines = _entry_sections(conn, cfg, season, week)
+    scoreboard = _scoreboard_strip(timelines) if timelines else ""
+    field_content = _field_summary_section(conn, cfg, season, week, include_field_names)
+    projector_content = _scenario_projector_section(conn, cfg, season, week, include_field_names)
+    simulation_content = _simulation_tab_content(conn, cfg, season, week)
+
+    tab_bodies = {
+        "overview": (
+            "<h1>Overview</h1>"
+            f'<p class="meta">{meta} &middot; generated {generated_at} &middot; static snapshot '
+            "&mdash; rerun <code>pool export-html</code> and push to refresh</p>"
+            + (scoreboard or '<p class="empty-note">No entries yet.</p>')
+        ),
+        "entries": f"<h1>My Entries</h1><p class=\"meta\">{meta}</p>" + (
+            entry_blocks or '<p class="empty-note">No entries yet.</p>'
+        ),
+        "field": f"<h1>Field</h1><p class=\"meta\">{meta}</p>" + (
+            field_content or '<p class="empty-note">No field data for this week.</p>'
+        ),
+        "projector": f"<h1>Scenario Projector</h1><p class=\"meta\">{meta}</p>" + (
+            projector_content
+            or '<p class="empty-note">No assignments logged for this week yet.</p>'
+        ),
+        "simulation": f"<h1>Simulation</h1><p class=\"meta\">{meta} &middot; Monte Carlo, "
+        "directional not precise</p>" + simulation_content,
+    }
+
+    nav_buttons = "".join(
+        f'<button class="tab-btn{" active" if i==0 else ""}" data-tab="{tab_id}">{label}</button>'
+        for i, (tab_id, label) in enumerate(_TABS)
+    )
+    tab_sections = "".join(
+        f'<section data-tabcontent="{tab_id}"{"" if i==0 else " hidden"}>{tab_bodies[tab_id]}</section>'
+        for i, (tab_id, _) in enumerate(_TABS)
+    )
+
+    tab_switch_js = """
+(function(){
+  var buttons = document.querySelectorAll('.tab-btn');
+  var contents = document.querySelectorAll('[data-tabcontent]');
+  buttons.forEach(function(btn){
+    btn.addEventListener('click', function(){
+      buttons.forEach(function(b){ b.classList.remove('active'); });
+      btn.classList.add('active');
+      contents.forEach(function(c){ c.hidden = (c.dataset.tabcontent !== btn.dataset.tab); });
+    });
+  });
+})();
+"""
 
     body = "".join(
         [
-            '<div class="wrap">',
-            '<header><p class="eyebrow">Office-Pool-4-Fun &middot; Strategy Console</p>',
-            f"<h1>{_esc(heading)}</h1>",
-            f'<p class="meta">{meta}generated {generated_at} &middot; static snapshot &mdash; '
-            "rerun <code>pool export-html</code> and push to refresh</p></header>",
-            _scoreboard_strip(timelines) if timelines else "",
-            _scenario_projector_section(conn, cfg, season, week, include_field_names),
-            entry_blocks,
-            _field_summary_section(conn, cfg, season, week, include_field_names),
+            '<div id="app">',
+            "<nav>",
+            '<div class="brand"><p class="eyebrow">Office-Pool-4-Fun</p>'
+            '<p class="brand-title">Strategy Console</p></div>',
+            nav_buttons,
+            f'<div class="nav-foot"><p class="meta" style="margin:0">{meta}<br>generated {generated_at}</p></div>',
+            "</nav>",
+            "<main>",
+            tab_sections,
             "<footer>"
             f"<b>Confirmed &mdash; upset direction:</b> a favorite betting LOSS against a "
             f"qualifying spread counts as a 10&times; upset, same as an underdog WIN: "
@@ -675,7 +784,9 @@ def render_report_html(
             "Simulation outputs are directional, not precise &mdash; they don't know real future "
             "matchups or real competitor behavior."
             "</footer>",
+            "</main>",
             "</div>",
+            f"<script>{tab_switch_js}</script>",
         ]
     )
 

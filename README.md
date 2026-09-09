@@ -117,11 +117,21 @@ pass `--week` explicitly if the log ever looks off.)
 
 ## Publishing a static snapshot (GitHub Pages)
 
-`pool export-html` renders your entries' timelines, this week's
-recommendations, and a scenario-lab comparison across four bet-sizing
-policies into a single static page — no server, no live DB access. This is
-a **snapshot**, not a live view: rerun the command and push whenever you
-want the published page to reflect the current state.
+`pool export-html` renders a tabbed static page — no server, no live DB
+access. This is a **snapshot**, not a live view: rerun the command and push
+whenever you want the published page to reflect the current state.
+
+- **Overview** — scoreboard strip for your 3 entries.
+- **My Entries** — game log + this week's recommended pick per entry.
+- **Field** — the full field's standings/reconstruction (or aggregate
+  counts only, see `--no-field-names` below).
+- **Scenario Projector** — pick a hypothetical outcome per game and a
+  generalized field bet %, and the whole real field's projected standings
+  recompute instantly, entirely in the browser (no server round-trip).
+  Your 3 entries get individual pick/wager controls; the field uses one
+  shared bet-fraction slider assumed to bet WIN on their assigned team.
+- **Simulation** — the Monte Carlo P(1st)/top3/top10/expected-payout
+  comparison across four bet-sizing policies, for all 3 entries together.
 
 ```
 python -m pool.cli export-html --season 2026 --week 3 --out docs/index.html
