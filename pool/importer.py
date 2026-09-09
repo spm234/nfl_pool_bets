@@ -140,6 +140,9 @@ def import_assignments(
     return count, errors
 
 
+_UNSET = object()
+
+
 def record_game_result(
     conn: sqlite3.Connection,
     season_year: int,
@@ -147,15 +150,28 @@ def record_game_result(
     away_team: str,
     home_team: str,
     *,
-    favorite: Optional[str] = None,
-    margin: float = 0,
-    outcome: Optional[str] = None,
+    favorite=_UNSET,
+    margin=_UNSET,
+    outcome=_UNSET,
 ) -> int:
+    """Updates a game's favorite/margin/outcome. Any argument left at its
+    default is a partial update — it keeps whatever the game already has,
+    rather than clobbering it back to None/0. This matters because spread
+    and outcome are typically recorded at different times (spread before
+    kickoff, outcome after) and a second call for one shouldn't erase the
+    other.
+    """
     week_id = db.get_or_create_week(conn, season_year, week_number)
     game_id = db.get_or_create_game(conn, week_id, away_team, home_team)
+    current = conn.execute(
+        "SELECT favorite, spread_margin, outcome FROM game WHERE id = ?", (game_id,)
+    ).fetchone()
+    new_favorite = current["favorite"] if favorite is _UNSET else favorite
+    new_margin = current["spread_margin"] if margin is _UNSET else margin
+    new_outcome = current["outcome"] if outcome is _UNSET else outcome
     conn.execute(
         "UPDATE game SET favorite = ?, spread_margin = ?, outcome = ? WHERE id = ?",
-        (favorite, margin, outcome, game_id),
+        (new_favorite, new_margin, new_outcome, game_id),
     )
     conn.commit()
     return game_id

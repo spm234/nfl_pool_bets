@@ -1,14 +1,20 @@
-"""Live spread fetching for the user's assigned games.
+"""Live spread and result fetching for the user's assigned games.
 
 Deliberately uses a documented, scriptable lines API (The Odds API,
 https://the-odds-api.com) rather than scraping a sportsbook page or the
-Cleveland Plain Dealer directly — the CPD is paywalled/subscription content
-and the pool's actual 10x-qualification source, so it's a manual confirm
-step (see confirm_spread below), never something this script fetches or
-treats as authoritative on its own.
+pool's own settlement source directly (whatever that is — see
+PoolConfig.spread_source_name, which is a manual-confirmation label, not
+something this module fetches). A spread fetched here is never treated as
+authoritative for 10x-upset qualification on its own: it's stored as an
+early estimate (is_authoritative_for_upset=0), and only confirm_spread()
+below — a deliberate, separate manual step — can mark one authoritative.
 
-Every value this module returns or stores is an "early estimate": it is
-never written with is_authoritative_for_upset=1.
+Fetched results (fetch_completed_score) are different in kind from spreads:
+a final score isn't a matter of interpretation the way a betting line is,
+so there's no separate "confirm" step for it. The one real caveat is that
+this API reports only the final score, not the score at the end of
+regulation — see fetch_completed_score's docstring for what that means for
+the pool's OT-tie rule.
 """
 from __future__ import annotations
 
@@ -22,12 +28,22 @@ from typing import List, Optional
 from . import db
 
 ODDS_API_BASE = "https://api.the-odds-api.com/v4/sports/americanfootball_nfl/odds"
+SCORES_API_BASE = "https://api.the-odds-api.com/v4/sports/americanfootball_nfl/scores"
 
 
 @dataclass
 class SpreadEstimate:
     favorite: str  # 'home' | 'away' | 'even'
     margin: float
+    source: str
+    fetched_at: str
+
+
+@dataclass
+class GameResult:
+    outcome: str  # 'home' | 'away' | 'tie'
+    home_score: int
+    away_score: int
     source: str
     fetched_at: str
 
@@ -121,6 +137,85 @@ def fetch_spread_estimate(
         )
     return SpreadEstimate(
         "away", median_home_point, f"The Odds API, median of {n_books} books", fetched_at
+    )
+
+
+def fetch_completed_score(
+    away_team: str, home_team: str, *, api_key: Optional[str] = None, days_from: int = 3
+) -> GameResult:
+    """Fetches a completed game's final score from The Odds API's /scores
+    endpoint and returns the settled outcome.
+
+    Caveat: this endpoint reports only the final score (after any overtime),
+    not the score at the end of regulation. The pool's rule is that a game
+    tied at the end of regulation scores as a loss for any WIN/LOSS pick
+    regardless of who wins in OT — that distinction can't be recovered from
+    a final-score-only source. It's a non-issue when the final score is
+    tied (that can only happen if regulation was also tied), but a decisive
+    final score here is reported as a normal win/loss even if the game
+    actually went to overtime from a regulation tie; callers should surface
+    that caveat rather than treat a decisive result as unconditionally safe.
+    """
+    try:
+        import requests
+    except ImportError as e:
+        raise LiveDataError(
+            "The 'requests' package is required for live score fetching. "
+            "Install it with: pip install requests"
+        ) from e
+
+    key = api_key or os.environ.get("THE_ODDS_API_KEY")
+    if not key:
+        raise LiveDataError(
+            "No API key found. Set THE_ODDS_API_KEY or pass api_key= explicitly. "
+            "Sign up at https://the-odds-api.com for a free-tier key."
+        )
+
+    try:
+        resp = requests.get(
+            SCORES_API_BASE,
+            params={"apiKey": key, "daysFrom": days_from},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        events = resp.json()
+    except requests.RequestException as e:
+        raise LiveDataError(f"Request to The Odds API failed: {e}") from e
+
+    away_n, home_n = _normalize(away_team), _normalize(home_team)
+    match = None
+    for event in events:
+        if _normalize(event.get("away_team", "")) == away_n and _normalize(
+            event.get("home_team", "")
+        ) == home_n:
+            match = event
+            break
+    if match is None:
+        raise LiveDataError(
+            f"No score data found for {away_team} @ {home_team} in the last {days_from} day(s). "
+            "Check team-name spelling, or the game may not have been played yet."
+        )
+    if not match.get("completed"):
+        raise LiveDataError(f"{away_team} @ {home_team} is not marked completed yet.")
+
+    scores = {_normalize(s["name"]): int(s["score"]) for s in match.get("scores") or []}
+    if away_n not in scores or home_n not in scores:
+        raise LiveDataError(
+            f"Game marked completed but score data is incomplete for {away_team} @ {home_team}."
+        )
+    away_score, home_score = scores[away_n], scores[home_n]
+    fetched_at = datetime.now(timezone.utc).isoformat()
+
+    if away_score == home_score:
+        outcome = "tie"
+    elif home_score > away_score:
+        outcome = "home"
+    else:
+        outcome = "away"
+
+    return GameResult(
+        outcome=outcome, home_score=home_score, away_score=away_score,
+        source="The Odds API", fetched_at=fetched_at,
     )
 
 

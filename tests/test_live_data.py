@@ -90,3 +90,74 @@ def test_confirm_spread_is_authoritative_and_updates_game(conn):
     game = conn.execute("SELECT favorite, spread_margin FROM game WHERE id = ?", (game_id,)).fetchone()
     assert game["favorite"] == "home"
     assert game["spread_margin"] == 10.0
+
+
+def _fake_scores_requests(events):
+    fake_requests = types.SimpleNamespace()
+    fake_requests.get = lambda url, params=None, timeout=None: _FakeResponse(events)
+    fake_requests.RequestException = Exception
+    return fake_requests
+
+
+def test_fetch_completed_score_home_win(monkeypatch):
+    monkeypatch.setitem(
+        __import__("sys").modules,
+        "requests",
+        _fake_scores_requests(
+            [
+                {
+                    "away_team": "Atlanta",
+                    "home_team": "Pittsburgh",
+                    "completed": True,
+                    "scores": [
+                        {"name": "Atlanta", "score": "17"},
+                        {"name": "Pittsburgh", "score": "24"},
+                    ],
+                }
+            ]
+        ),
+    )
+    result = live_data.fetch_completed_score("Atlanta", "Pittsburgh", api_key="test-key")
+    assert result.outcome == "home"
+    assert result.home_score == 24
+    assert result.away_score == 17
+
+
+def test_fetch_completed_score_tie(monkeypatch):
+    monkeypatch.setitem(
+        sys.modules,
+        "requests",
+        _fake_scores_requests(
+            [
+                {
+                    "away_team": "Atlanta",
+                    "home_team": "Pittsburgh",
+                    "completed": True,
+                    "scores": [
+                        {"name": "Atlanta", "score": "20"},
+                        {"name": "Pittsburgh", "score": "20"},
+                    ],
+                }
+            ]
+        ),
+    )
+    result = live_data.fetch_completed_score("Atlanta", "Pittsburgh", api_key="test-key")
+    assert result.outcome == "tie"
+
+
+def test_fetch_completed_score_not_completed_raises(monkeypatch):
+    monkeypatch.setitem(
+        sys.modules,
+        "requests",
+        _fake_scores_requests(
+            [{"away_team": "Atlanta", "home_team": "Pittsburgh", "completed": False, "scores": None}]
+        ),
+    )
+    with pytest.raises(live_data.LiveDataError, match="not marked completed"):
+        live_data.fetch_completed_score("Atlanta", "Pittsburgh", api_key="test-key")
+
+
+def test_fetch_completed_score_no_match_raises(monkeypatch):
+    monkeypatch.setitem(sys.modules, "requests", _fake_scores_requests([]))
+    with pytest.raises(live_data.LiveDataError, match="No score data found"):
+        live_data.fetch_completed_score("Atlanta", "Pittsburgh", api_key="test-key")

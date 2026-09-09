@@ -89,17 +89,41 @@ def cmd_import_assignments(args):
 
 def cmd_record_result(args):
     conn = db.connect(args.db)
-    importer.record_game_result(
-        conn,
-        args.season,
-        args.week,
-        args.away,
-        args.home,
-        favorite=args.favorite,
-        margin=args.margin,
-        outcome=args.outcome,
-    )
+    # Only pass fields that were actually given, so e.g. recording the
+    # outcome after the fact doesn't wipe a previously-recorded spread.
+    kwargs = {}
+    if args.favorite is not None:
+        kwargs["favorite"] = args.favorite
+    if args.margin is not None:
+        kwargs["margin"] = args.margin
+    if args.outcome is not None:
+        kwargs["outcome"] = args.outcome
+    importer.record_game_result(conn, args.season, args.week, args.away, args.home, **kwargs)
     print(f"Recorded result for {args.away} @ {args.home}, week {args.week}.")
+    conn.close()
+
+
+def cmd_fetch_result(args):
+    conn = db.connect(args.db)
+    try:
+        result = live_data.fetch_completed_score(args.away, args.home, api_key=args.api_key)
+    except live_data.LiveDataError as e:
+        print(f"Could not fetch a result: {e}", file=sys.stderr)
+        sys.exit(1)
+    importer.record_game_result(
+        conn, args.season, args.week, args.away, args.home, outcome=result.outcome
+    )
+    print(
+        f"{args.away} {result.away_score} @ {args.home} {result.home_score} "
+        f"[{result.source}] -> outcome recorded as '{result.outcome}'"
+    )
+    if result.outcome != "tie":
+        print(
+            "Note: this source reports only the final score (including any overtime), not the "
+            "score at the end of regulation. If this game went to OT and was tied after regulation, "
+            "the pool rule scores any WIN/LOSS pick as a loss regardless of the OT winner — verify "
+            "separately if you know this game went to OT."
+        )
     conn.close()
 
 
@@ -361,15 +385,32 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--file", help="Read from this file instead of stdin")
         sp.set_defaults(func=fn)
 
-    sp = sub.add_parser("record-result", help="Record a game's spread + outcome")
+    sp = sub.add_parser("record-result", help="Record a game's spread and/or outcome")
     sp.add_argument("--season", type=int, required=True)
     sp.add_argument("--week", type=int, required=True)
     sp.add_argument("--away", required=True)
     sp.add_argument("--home", required=True)
-    sp.add_argument("--favorite", choices=["home", "away"], default=None)
-    sp.add_argument("--margin", type=float, default=0)
-    sp.add_argument("--outcome", choices=["home", "away", "tie"], default=None)
+    sp.add_argument(
+        "--favorite", choices=["home", "away"], default=None,
+        help="Omit to leave the currently recorded favorite unchanged",
+    )
+    sp.add_argument(
+        "--margin", type=float, default=None,
+        help="Omit to leave the currently recorded margin unchanged (pass 0 explicitly for pick'em)",
+    )
+    sp.add_argument(
+        "--outcome", choices=["home", "away", "tie"], default=None,
+        help="Omit to leave the currently recorded outcome unchanged",
+    )
     sp.set_defaults(func=cmd_record_result)
+
+    sp = sub.add_parser("fetch-result", help="Fetch a completed game's final score and record its outcome")
+    sp.add_argument("--season", type=int, required=True)
+    sp.add_argument("--week", type=int, required=True)
+    sp.add_argument("--away", required=True)
+    sp.add_argument("--home", required=True)
+    sp.add_argument("--api-key", default=None)
+    sp.set_defaults(func=cmd_fetch_result)
 
     sp = sub.add_parser("record-my-pick", help="Record one of my entries' pick/bet for a week")
     sp.add_argument("--season", type=int, required=True)

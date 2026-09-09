@@ -71,9 +71,13 @@ python -m pool.cli import-assignments --season 2026 --week 1 --file assignments.
 # prototype's manual paste box)
 python -m pool.cli import-standings --season 2026 --week 1 --file standings.txt
 
-# Record a settled game's spread + outcome
+# Record a settled game's spread and/or outcome (only the fields you pass
+# are changed — recording the outcome later won't wipe an earlier spread)
 python -m pool.cli record-result --season 2026 --week 1 \
     --away Atlanta --home Pittsburgh --favorite away --margin 3 --outcome home
+
+# Fetch a completed game's final score and record its outcome automatically
+python -m pool.cli fetch-result --season 2026 --week 1 --away Atlanta --home Pittsburgh
 
 # Record one of my own picks
 python -m pool.cli record-my-pick --season 2026 --week 1 --entry "My Entry 1" \
@@ -147,8 +151,25 @@ API path wired into this tool for it):
   not a scrape. Every value it returns is stored with
   `is_authoritative_for_upset = 0` and printed as an "EARLY ESTIMATE." The
   only way to mark a spread authoritative for 10x-upset qualification is
-  `confirm-spread`, which you run after checking the pool's actual source
-  (Cleveland Plain Dealer, Thursday) yourself.
+  `confirm-spread`, which you run after checking your actual settlement
+  source (`spread_source_name` in config — set it to whatever you check;
+  it's not tied to any particular publication) yourself. This confirm step
+  is deliberately not automated: a fetched line is a market estimate, and
+  the pool's real qualification source may not agree with it.
+- **Results**: `fetch-result` pulls a completed game's final score from the
+  same Odds API and records the outcome — same API key, no new dependency.
+  Unlike spreads, there's no separate confirm step for results, since a
+  final score isn't a matter of interpretation. The one real caveat: this
+  source reports only the final score (including any overtime), not the
+  score at the end of regulation. The pool's rule scores a game tied at
+  regulation as a loss for any WIN/LOSS pick regardless of who wins in OT —
+  that distinction can't be recovered from a final-score-only source. A
+  *tied* final score is unambiguous (it can only happen if regulation was
+  also tied), but a decisive final score for a game that actually went to
+  OT from a regulation tie would be recorded as a normal win/loss.
+  `fetch-result` prints a reminder of this every time it records a
+  decisive (non-tie) outcome — verify separately if you know a game went
+  to OT.
 - **officepool4fun.com standings**: **not built.** This session's sandbox
   network policy blocked outbound access to the domain entirely, so
   reachability/login-wall status couldn't be verified before writing a
@@ -169,10 +190,11 @@ trusting the numbers, then flip the config value if wrong:
    directions qualify (`upset_counts_favorite_loss = 1` in `pool_config`).
    Flip with `config-set --counts-favorite-loss no` if the pool operator
    confirms otherwise.
-2. **Spread source snapshot**: the 10+ threshold is read from the Thursday
-   Cleveland Plain Dealer at a fixed time — confirm which exact snapshot the
-   pool operator uses. `spread_source_name` in config documents whatever
-   you confirm.
+2. **Spread source snapshot**: the 10+ threshold is read from whatever
+   source the pool operator actually uses, at whatever time they check it —
+   confirm which exact source and snapshot that is. `spread_source_name` in
+   config documents whatever you confirm; it defaults to a placeholder, not
+   a real source, until you set it.
 3. **Regulation tie**: a tie pick on a regulation tie pays 10x regardless of
    the OT winner; any WIN/LOSS pick loses regardless of the OT winner. This
    one is not user-configurable since it's stated as a firm rule, not an

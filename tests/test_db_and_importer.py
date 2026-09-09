@@ -121,3 +121,33 @@ def test_field_reconstruction_end_to_end(conn):
     # inference should have been persisted
     stored = conn.execute("SELECT COUNT(*) AS n FROM wager_inference").fetchone()
     assert stored["n"] >= 1
+
+
+def test_record_game_result_partial_update_preserves_other_fields(conn):
+    importer.record_game_result(
+        conn, 2026, 1, "Atlanta", "Pittsburgh", favorite="away", margin=12, outcome=None
+    )
+    # Recording just the outcome later must not wipe the previously-set spread.
+    importer.record_game_result(conn, 2026, 1, "Atlanta", "Pittsburgh", outcome="home")
+
+    game = conn.execute(
+        "SELECT favorite, spread_margin, outcome FROM game g JOIN week w ON w.id = g.week_id "
+        "WHERE w.season_year = 2026 AND w.week_number = 1"
+    ).fetchone()
+    assert game["favorite"] == "away"
+    assert game["spread_margin"] == 12
+    assert game["outcome"] == "home"
+
+
+def test_record_game_result_explicit_none_clears_favorite(conn):
+    importer.record_game_result(
+        conn, 2026, 1, "Atlanta", "Pittsburgh", favorite="away", margin=12
+    )
+    importer.record_game_result(conn, 2026, 1, "Atlanta", "Pittsburgh", favorite=None, margin=0)
+
+    game = conn.execute(
+        "SELECT favorite, spread_margin FROM game g JOIN week w ON w.id = g.week_id "
+        "WHERE w.season_year = 2026 AND w.week_number = 1"
+    ).fetchone()
+    assert game["favorite"] is None
+    assert game["spread_margin"] == 0

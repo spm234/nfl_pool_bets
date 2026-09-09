@@ -26,7 +26,7 @@ class PoolConfig:
     late_pick_default_bet: float = 20
     late_pick_default_side: str = "home"
     late_pick_default_pick: str = "WIN"
-    spread_source_name: str = "Cleveland Plain Dealer (Thursday)"
+    spread_source_name: str = "manually confirmed source (set spread_source_name)"
     upset_counts_favorite_loss: bool = True
     default_field_size: int = 107
 

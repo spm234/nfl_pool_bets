@@ -29,7 +29,10 @@ CREATE TABLE IF NOT EXISTS pool_config (
     late_pick_default_bet   REAL    NOT NULL DEFAULT 20,
     late_pick_default_side  TEXT    NOT NULL DEFAULT 'home',
     late_pick_default_pick  TEXT    NOT NULL DEFAULT 'WIN',
-    spread_source_name      TEXT    NOT NULL DEFAULT 'Cleveland Plain Dealer (Thursday)',
+    -- Whatever source you actually check before betting a 10x upset —
+    -- not tied to any particular publication. Only confirm_spread() can
+    -- mark a line authoritative; a fetched estimate never can.
+    spread_source_name      TEXT    NOT NULL DEFAULT 'manually confirmed source (set spread_source_name)',
     -- Open assumption (see README): does betting the FAVORITE to LOSE against a
     -- qualifying spread also count as a paying "upset", or is it underdog-WIN only?
     -- Config-driven so it can be flipped without touching code once confirmed.
