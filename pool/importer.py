@@ -86,6 +86,58 @@ def import_schedule(
     return count
 
 
+def import_week_csv(
+    conn: sqlite3.Connection, season_year: int, week_number: int, csv_text: str
+) -> int:
+    """One-shot import matching the pool's own weekly export format:
+    header 'Rank,Team Name,Total Pts,Away,Home', one row per entry. This
+    covers schedule + assignment + standings in a single pass.
+
+    The assigned side is always 'away' — confirmed directly against how
+    this pool actually works: every entry is nominally assigned the away
+    team, and picking WIN/LOSS/TIE for that team is how you bet the game
+    either way (there's no separate "pick the home team instead").
+    """
+    import csv
+    import io
+
+    week_id = db.get_or_create_week(conn, season_year, week_number)
+    reader = csv.DictReader(io.StringIO(csv_text.strip()))
+    fieldnames = {(f or "").strip(): f for f in (reader.fieldnames or [])}
+    required = {"Team Name", "Total Pts", "Away", "Home"}
+    missing = required - set(fieldnames)
+    if missing:
+        raise ValueError(
+            f"CSV is missing required column(s): {', '.join(sorted(missing))}. "
+            f"Expected header: Rank,Team Name,Total Pts,Away,Home"
+        )
+
+    count = 0
+    for row in reader:
+        name = (row[fieldnames["Team Name"]] or "").strip()
+        if not name:
+            continue
+        points = float((row[fieldnames["Total Pts"]] or "").strip())
+        away = (row[fieldnames["Away"]] or "").strip()
+        home = (row[fieldnames["Home"]] or "").strip()
+
+        game_id = db.get_or_create_game(conn, week_id, away, home)
+        entry_id = db.get_or_create_entry(conn, owner_name=name, display_name=name)
+        db.get_or_create_assignment(conn, entry_id, game_id, "away")
+        conn.execute(
+            """
+            INSERT INTO entry_week_points (entry_id, week_id, points)
+            VALUES (?, ?, ?)
+            ON CONFLICT(entry_id, week_id) DO UPDATE SET points = excluded.points
+            """,
+            (entry_id, week_id, points),
+        )
+        count += 1
+
+    conn.commit()
+    return count
+
+
 @dataclass
 class AssignmentImportError:
     name: str

@@ -151,3 +151,61 @@ def test_record_game_result_explicit_none_clears_favorite(conn):
     ).fetchone()
     assert game["favorite"] is None
     assert game["spread_margin"] == 0
+
+
+_SAMPLE_WEEK_CSV = """Rank,Team Name,Total Pts,Away,Home
+ 1,  01 Sportsbet, 150, Cleveland, Jacksonville
+ 2,  Creative Destruction, 150, NY Jets, Tennessee
+ 3, Always Hot, 150, Atlanta, Pittsburgh
+ 4, SPM, 150, Dallas, NY Giants
+"""
+
+
+def test_import_week_csv_matches_real_export_shape(conn):
+    count = importer.import_week_csv(conn, 2026, 1, _SAMPLE_WEEK_CSV)
+    assert count == 4
+
+    # every entry gets assigned_side = 'away'
+    sides = conn.execute(
+        "SELECT DISTINCT assigned_side FROM assignment"
+    ).fetchall()
+    assert [r["assigned_side"] for r in sides] == ["away"]
+
+    # standings applied
+    points_row = conn.execute(
+        """
+        SELECT ewp.points FROM entry_week_points ewp
+        JOIN entry e ON e.id = ewp.entry_id WHERE e.display_name = 'Always Hot'
+        """
+    ).fetchone()
+    assert points_row["points"] == 150
+
+    # schedule created
+    games = conn.execute("SELECT away_team, home_team FROM game").fetchall()
+    assert ("Cleveland", "Jacksonville") in {(g["away_team"], g["home_team"]) for g in games}
+
+
+def test_import_week_csv_attaches_to_preseeded_my_entry(conn):
+    importer.import_week_csv(conn, 2026, 1, _SAMPLE_WEEK_CSV)
+    spm = conn.execute(
+        "SELECT id, is_mine FROM entry WHERE display_name = 'SPM'"
+    ).fetchone()
+    assert spm["is_mine"] == 1
+    # no duplicate "SPM" entry was created alongside the pre-seeded one
+    count = conn.execute(
+        "SELECT COUNT(*) AS n FROM entry WHERE display_name = 'SPM'"
+    ).fetchone()
+    assert count["n"] == 1
+
+
+def test_import_week_csv_missing_column_raises(conn):
+    bad_csv = "Rank,Team Name,Away,Home\n1,Always Hot,Atlanta,Pittsburgh\n"
+    with pytest.raises(ValueError, match="Total Pts"):
+        importer.import_week_csv(conn, 2026, 1, bad_csv)
+
+
+def test_import_week_csv_idempotent_on_rerun(conn):
+    importer.import_week_csv(conn, 2026, 1, _SAMPLE_WEEK_CSV)
+    importer.import_week_csv(conn, 2026, 1, _SAMPLE_WEEK_CSV)  # rerun, e.g. re-uploaded file
+    count = conn.execute("SELECT COUNT(*) AS n FROM entry WHERE display_name = 'Always Hot'").fetchone()
+    assert count["n"] == 1

@@ -18,7 +18,7 @@ def connect(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
 def init_db(
     db_path: Path | str = DEFAULT_DB_PATH,
     *,
-    my_entry_names: tuple[str, ...] = ("My Entry 1", "My Entry 2", "My Entry 3"),
+    my_entry_names: tuple[str, ...] = ("SPM", "SPM 2", "SPM 3"),
 ) -> None:
     conn = connect(db_path)
     try:

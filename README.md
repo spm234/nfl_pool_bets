@@ -15,7 +15,8 @@ python -m pool.cli init-db
 ```
 
 This creates `pool.db` in the project root (override with `--db path`) and
-seeds your 3 entries ("My Entry 1/2/3" under owner "Me").
+seeds your 3 entries (SPM, SPM 2, SPM 3 under owner "Me" — pass
+`my_entry_names` to `db.init_db` if you want different names).
 
 Run tests with:
 
@@ -62,13 +63,16 @@ python -m pool.cli config-show
 python -m pool.cli config-set --min-bet 20 --entry-fee 30 \
     --payouts 40,18,10,9,7,6,4,3,2,1
 
-# Import a schedule, then assignments (paste "Name, Team" — resolved
-# against the schedule to get home/away right)
+# One-shot weekly import matching the pool's own export shape exactly
+# (header: Rank,Team Name,Total Pts,Away,Home) — schedule + assignments +
+# standings in a single pass. Every entry is assigned the AWAY team
+# (confirmed: that's how this pool actually works — WIN/LOSS/TIE is your
+# bet on that team, there's no separate "pick the home team instead").
+python -m pool.cli import-week --season 2026 --week 1 --file week1.csv
+
+# Or piece by piece, if your data doesn't come as one file:
 python -m pool.cli import-schedule --season 2026 --week 1 --file schedule.txt
 python -m pool.cli import-assignments --season 2026 --week 1 --file assignments.txt
-
-# Import posted standings (paste "Name, Points" — same shape as the
-# prototype's manual paste box)
 python -m pool.cli import-standings --season 2026 --week 1 --file standings.txt
 
 # Record a settled game's spread and/or outcome (only the fields you pass
@@ -80,8 +84,8 @@ python -m pool.cli record-result --season 2026 --week 1 \
 python -m pool.cli fetch-result --season 2026 --week 1 --away Atlanta --home Pittsburgh
 
 # Record one of my own picks
-python -m pool.cli record-my-pick --season 2026 --week 1 --entry "My Entry 1" \
-    --away Atlanta --home Pittsburgh --side home --pick WIN --bet 30
+python -m pool.cli record-my-pick --season 2026 --week 1 --entry SPM \
+    --away Atlanta --home Pittsburgh --side away --pick WIN --bet 30
 
 # Live spread estimate (never authoritative for 10x qualification — see below)
 python -m pool.cli fetch-spread --season 2026 --week 1 --away Atlanta --home Pittsburgh
@@ -92,7 +96,7 @@ python -m pool.cli confirm-spread --season 2026 --week 1 \
     --away Atlanta --home Pittsburgh --favorite away --margin 10 \
     --source "Cleveland Plain Dealer, 2026-09-11"
 
-python -m pool.cli timeline --entry "My Entry 1"
+python -m pool.cli timeline --entry SPM
 python -m pool.cli field --season 2026 --week 1
 python -m pool.cli profiles
 
@@ -180,30 +184,38 @@ API path wired into this tool for it):
   added to `pool/live_data.py` alongside the spread fetcher; if it needs
   auth, the manual-paste path is the intended answer, not a workaround.
 
-## Open assumptions to validate (carried over from the prototype)
+## Confirmed rules (previously open assumptions)
+
+- **Upset direction**: betting the *favorite* to LOSE against a 10+ spread
+  does pay 10x, same as an underdog-WIN — confirmed directly by you, not
+  just inherited from the prototype. `upset_counts_favorite_loss = 1` in
+  `pool_config` reflects this; flip it with `config-set
+  --counts-favorite-loss no` if that ever turns out wrong in practice.
+- **Assignment**: every entry (yours and the field's) is assigned the AWAY
+  team specifically — confirmed. `import-week` and `import_week_csv` bake
+  this in directly rather than trying to infer a side.
+
+## Open assumptions still to validate
 
 These affect real point totals — validate against a settled week before
 trusting the numbers, then flip the config value if wrong:
 
-1. **Upset direction**: does betting the *favorite* to LOSE against a 10+
-   spread also pay 10x, or is it underdog-WIN only? Currently assumed both
-   directions qualify (`upset_counts_favorite_loss = 1` in `pool_config`).
-   Flip with `config-set --counts-favorite-loss no` if the pool operator
-   confirms otherwise.
-2. **Spread source snapshot**: the 10+ threshold is read from whatever
+1. **Spread source snapshot**: the 10+ threshold is read from whatever
    source the pool operator actually uses, at whatever time they check it —
    confirm which exact source and snapshot that is. `spread_source_name` in
    config documents whatever you confirm; it defaults to a placeholder, not
    a real source, until you set it.
-3. **Regulation tie**: a tie pick on a regulation tie pays 10x regardless of
+2. **Regulation tie**: a tie pick on a regulation tie pays 10x regardless of
    the OT winner; any WIN/LOSS pick loses regardless of the OT winner. This
    one is not user-configurable since it's stated as a firm rule, not an
    assumption.
 
 To validate: enter one fully-settled real week via `record-my-pick` +
-`record-result`, then `timeline --entry "My Entry 1"` and compare the
-computed total against the pool's actual posted total. A mismatch almost
-always means assumption #1 above needs flipping.
+`record-result`, then `timeline --entry SPM` and compare the
+computed total against the pool's actual posted total. A mismatch means
+whatever source is confirming your spreads doesn't match the pool
+operator's actual snapshot (assumption #1 above) — the direction and
+assignment rules are already confirmed, so they're not the likely culprit.
 
 ## What's deliberately thin
 

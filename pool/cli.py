@@ -87,6 +87,18 @@ def cmd_import_assignments(args):
     conn.close()
 
 
+def cmd_import_week_csv(args):
+    conn = db.connect(args.db)
+    text = _read_text(args.file)
+    try:
+        count = importer.import_week_csv(conn, args.season, args.week, text)
+    except ValueError as e:
+        print(f"Import failed: {e}", file=sys.stderr)
+        sys.exit(1)
+    print(f"Imported {count} entries (schedule + assignments + standings) for week {args.week}.")
+    conn.close()
+
+
 def cmd_record_result(args):
     conn = db.connect(args.db)
     # Only pass fields that were actually given, so e.g. recording the
@@ -384,6 +396,16 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--week", type=int, required=True)
         sp.add_argument("--file", help="Read from this file instead of stdin")
         sp.set_defaults(func=fn)
+
+    sp = sub.add_parser(
+        "import-week",
+        help="One-shot import matching the pool's own weekly export "
+        "(header: Rank,Team Name,Total Pts,Away,Home)",
+    )
+    sp.add_argument("--season", type=int, required=True)
+    sp.add_argument("--week", type=int, required=True)
+    sp.add_argument("--file", help="Read from this file instead of stdin")
+    sp.set_defaults(func=cmd_import_week_csv)
 
     sp = sub.add_parser("record-result", help="Record a game's spread and/or outcome")
     sp.add_argument("--season", type=int, required=True)

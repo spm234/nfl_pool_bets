@@ -15,8 +15,12 @@ def conn(tmp_path):
 
 
 def _seed(conn):
+    # "SPM" matches one of the pre-seeded is_mine entries from db.init_db —
+    # using any other name here would silently create a new field entry
+    # instead of attaching to the real "my entry" (see db.get_or_create_entry's
+    # global-by-display-name lookup).
     importer.import_schedule(conn, 2026, 1, "Atlanta, Pittsburgh\n")
-    importer.import_assignments(conn, 2026, 1, "My Entry 1, Pittsburgh\nAlways Hot, Atlanta\n")
+    importer.import_assignments(conn, 2026, 1, "SPM, Pittsburgh\nAlways Hot, Atlanta\n")
     importer.record_game_result(
         conn, 2026, 1, "Atlanta", "Pittsburgh", favorite="away", margin=12, outcome="home"
     )
@@ -49,7 +53,7 @@ def test_render_report_includes_my_entries_and_scenarios(conn):
     _seed(conn)
     cfg = PoolConfig.load(conn)
     out = render_report_html(conn, cfg, season=2026, week=1)
-    assert "My Entry 1" in out
+    assert "SPM" in out
     assert "Scenario lab" in out
     assert "Aggressive" in out
 
