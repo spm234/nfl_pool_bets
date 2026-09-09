@@ -4,7 +4,11 @@ import pytest
 
 from pool import db, importer
 from pool.config import PoolConfig
-from pool.queries import compute_field_reconstruction, compute_my_entry_timeline
+from pool.queries import (
+    compute_field_reconstruction,
+    compute_my_entry_timeline,
+    get_scenario_projection_data,
+)
 
 
 @pytest.fixture
@@ -209,3 +213,43 @@ def test_import_week_csv_idempotent_on_rerun(conn):
     importer.import_week_csv(conn, 2026, 1, _SAMPLE_WEEK_CSV)  # rerun, e.g. re-uploaded file
     count = conn.execute("SELECT COUNT(*) AS n FROM entry WHERE display_name = 'Always Hot'").fetchone()
     assert count["n"] == 1
+
+
+def test_scenario_projection_data_week_1_defaults_to_start_points(conn):
+    importer.import_week_csv(conn, 2026, 1, _SAMPLE_WEEK_CSV)
+    cfg = PoolConfig.load(conn)
+    data = get_scenario_projection_data(conn, 2026, 1, cfg)
+
+    assert len(data.entries) == 4
+    spm = next(e for e in data.entries if e.name == "SPM")
+    assert spm.is_mine is True
+    assert spm.points_entering_week == 150
+    assert spm.assigned_side == "away"
+    assert spm.away_team == "Dallas" and spm.home_team == "NY Giants"
+
+    field_entry = next(e for e in data.entries if e.name == "Always Hot")
+    assert field_entry.is_mine is False
+
+    game_keys = {(g.away_team, g.home_team) for g in data.games}
+    assert ("Atlanta", "Pittsburgh") in game_keys
+    assert ("Dallas", "NY Giants") in game_keys
+
+
+def test_scenario_projection_data_uses_prior_week_points(conn):
+    importer.import_week_csv(conn, 2026, 1, _SAMPLE_WEEK_CSV)
+    # Week 2: same entries, different (already-known) points entering week 2.
+    week2_csv = _SAMPLE_WEEK_CSV.replace("150", "180")
+    importer.import_week_csv(conn, 2026, 2, week2_csv)
+
+    cfg = PoolConfig.load(conn)
+    data = get_scenario_projection_data(conn, 2026, 2, cfg)
+    spm = next(e for e in data.entries if e.name == "SPM")
+    # Entering week 2 should reflect week 1's posted points (150), not week 2's.
+    assert spm.points_entering_week == 150
+
+
+def test_scenario_projection_data_no_week_returns_empty(conn):
+    cfg = PoolConfig.load(conn)
+    data = get_scenario_projection_data(conn, 2026, 5, cfg)
+    assert data.entries == []
+    assert data.games == []

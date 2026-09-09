@@ -14,12 +14,17 @@ That's a one-time choice for a personal scoreboard page, not an oversight.
 from __future__ import annotations
 
 import html
+import json
 import sqlite3
 from datetime import datetime, timezone
 from typing import List, Optional
 
 from .config import PoolConfig
-from .queries import compute_field_reconstruction, compute_my_entry_timeline
+from .queries import (
+    compute_field_reconstruction,
+    compute_my_entry_timeline,
+    get_scenario_projection_data,
+)
 from .recommend import build_weekly_recommendations
 from .simulation import EntryPolicy, SimAssumptions, run_simulation
 
@@ -118,6 +123,27 @@ tr:last-child td{border-bottom:none;}
 .stat-tile .n{font-family:'Big Shoulders Display',sans-serif; font-weight:800; font-size:28px; color:var(--amber);}
 .stat-tile .l{font-size:12px; color:var(--chalk-dim); margin-top:2px;}
 .empty-note{font-size:13px; color:var(--chalk-dim); font-style:italic;}
+.scenario-row{
+  display:flex; flex-wrap:wrap; align-items:center; gap:10px;
+  padding:9px 0; border-bottom:1px solid rgba(255,255,255,.05);
+}
+.scenario-row:last-child{border-bottom:none;}
+.scenario-row .game-label{font-family:'IBM Plex Mono',monospace; font-size:12.5px; min-width:190px;}
+.scenario-row select, .scenario-row input[type=number]{
+  background:var(--turf); border:1px solid var(--line); color:var(--chalk);
+  border-radius:5px; padding:5px 8px; font-family:'IBM Plex Mono',monospace; font-size:12.5px;
+}
+.scenario-row input[type=range]{accent-color:var(--amber); flex:1; min-width:100px;}
+.scenario-mine-card{
+  background:var(--turf); border:1px solid var(--line); border-radius:6px;
+  padding:10px 12px; display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-bottom:8px;
+}
+.scenario-mine-card .name{font-weight:600; min-width:70px;}
+.scenario-mine-card label{font-size:10.5px; color:var(--chalk-dim); text-transform:uppercase; letter-spacing:.05em; margin-right:4px;}
+.scenario-mine-card input[type=number]{width:80px;}
+#scenarioTable tr.mine td{color:var(--amber); font-weight:600;}
+#scenarioTable tr.mine td:first-child, #scenarioTable tr.mine td:nth-child(2){color:var(--chalk);}
+#scenarioTable tr.mine td.mono{color:var(--amber);}
 footer{
   margin-top:50px; padding-top:20px; border-top:1px dashed var(--line);
   font-family:'IBM Plex Mono',monospace; font-size:11.5px; color:var(--chalk-dim); line-height:1.7;
@@ -339,6 +365,228 @@ def _entry_sections(
     return "".join(blocks), timelines
 
 
+def _scenario_projector_section(
+    conn: sqlite3.Connection,
+    cfg: PoolConfig,
+    season: Optional[int],
+    week: Optional[int],
+    include_field_names: bool,
+) -> str:
+    """Client-side, entirely-in-browser 'what if' standings projector: pick
+    an outcome per game and a generalized field bet %, see the whole real
+    field's (and your own) projected standings recompute instantly. No
+    server involved — the scoring engine below is a JS port of
+    pool/scoring.py, evaluated against the JSON data embedded in the page.
+
+    Respects include_field_names the same as the rest of the export: when
+    False, only 'my' entries are embedded — the field's names/points are
+    just as public here (baked into the page's JSON) as anywhere else on
+    the page, so this can't be looser than that setting.
+    """
+    if season is None or week is None:
+        return ""
+    data = get_scenario_projection_data(conn, season, week, cfg)
+    if not include_field_names:
+        data.entries = [e for e in data.entries if e.is_mine]
+        relevant_games = {(e.away_team, e.home_team) for e in data.entries}
+        data.games = [g for g in data.games if (g.away_team, g.home_team) in relevant_games]
+    if not data.entries:
+        return ""
+
+    payload = {
+        "config": {
+            "upsetThreshold": cfg.upset_spread_threshold,
+            "upsetMultiplier": cfg.upset_multiplier,
+            "tieMultiplier": cfg.tie_multiplier,
+            "countsFavoriteLoss": cfg.upset_counts_favorite_loss,
+            "minBet": cfg.min_bet,
+        },
+        "games": [
+            {"away": g.away_team, "home": g.home_team, "favorite": g.favorite,
+             "margin": g.margin, "outcome": g.outcome}
+            for g in data.games
+        ],
+        "entries": [
+            {"name": e.name, "mine": e.is_mine, "away": e.away_team, "home": e.home_team,
+             "side": e.assigned_side, "points": e.points_entering_week}
+            for e in data.entries
+        ],
+    }
+    # Guard against a name containing "</script>" breaking out of the tag.
+    payload_json = json.dumps(payload).replace("</", "<\\/")
+
+    js = r"""
+(function(){
+  var raw = document.getElementById('scenario-data');
+  if(!raw) return;
+  var DATA = JSON.parse(raw.textContent);
+  var cfg = DATA.config;
+
+  function spreadForTeam(game, side){
+    if(!game || !game.margin) return 0;
+    return game.favorite===side ? -game.margin : game.margin;
+  }
+  function isUpsetPick(spread, pick){
+    if(Math.abs(spread) < cfg.upsetThreshold) return false;
+    if(spread>0 && pick==='WIN') return true;
+    if(spread<0 && pick==='LOSS' && cfg.countsFavoriteLoss) return true;
+    return false;
+  }
+  function outcomeForSide(selection, side){
+    if(!selection) return null;
+    if(selection==='tie') return 'TIE_REG';
+    return selection===side ? 'WIN' : 'LOSS';
+  }
+  function scoreBet(spread, pick, bet, outcome){
+    if(outcome==null) return 0;
+    if(outcome==='TIE_REG') return pick==='TIE' ? bet*cfg.tieMultiplier : -bet;
+    if(pick==='TIE') return -bet;
+    if(pick!==outcome) return -bet;
+    return bet*(isUpsetPick(spread,pick) ? cfg.upsetMultiplier : 1);
+  }
+  function clampBet(points, raw){
+    var floor = Math.min(cfg.minBet, points);
+    return Math.max(0, Math.min(points, Math.max(floor, Math.round(raw))));
+  }
+
+  var gamesById = {};
+  DATA.games.forEach(function(g){ gamesById[g.away+'@'+g.home] = g; });
+
+  var gamesBox = document.getElementById('scenarioGames');
+  var mineBox = document.getElementById('scenarioMine');
+  var fracInput = document.getElementById('fieldFrac');
+  var fracLabel = document.getElementById('fieldFracLabel');
+  var tbody = document.querySelector('#scenarioTable tbody');
+
+  var gameSelects = {};
+  DATA.games.forEach(function(g){
+    var key = g.away+'@'+g.home;
+    var row = document.createElement('div');
+    row.className = 'scenario-row';
+    var label = document.createElement('span');
+    label.className = 'game-label';
+    label.textContent = g.away+' @ '+g.home;
+    var sel = document.createElement('select');
+    [['','Not decided'], ['away', g.away+' wins'], ['home', g.home+' wins'], ['tie','Tied at regulation']]
+      .forEach(function(opt){
+        var o = document.createElement('option');
+        o.value = opt[0]; o.textContent = opt[1];
+        sel.appendChild(o);
+      });
+    if(g.outcome){ sel.value = g.outcome; }
+    sel.addEventListener('change', recompute);
+    gameSelects[key] = sel;
+    row.appendChild(label); row.appendChild(sel);
+    if(g.outcome){
+      var tag = document.createElement('span');
+      tag.className = 'badge-upset'; tag.textContent = 'settled';
+      row.appendChild(tag);
+    }
+    gamesBox.appendChild(row);
+  });
+
+  var minePicks = {}, mineBets = {};
+  DATA.entries.filter(function(e){ return e.mine; }).forEach(function(e){
+    var card = document.createElement('div');
+    card.className = 'scenario-mine-card';
+    var name = document.createElement('span');
+    name.className = 'name'; name.textContent = e.name;
+    var pickLabel = document.createElement('label'); pickLabel.textContent = 'Pick';
+    var pickSel = document.createElement('select');
+    ['WIN','LOSS','TIE'].forEach(function(p){
+      var o = document.createElement('option'); o.value = p; o.textContent = p;
+      pickSel.appendChild(o);
+    });
+    pickSel.value = 'WIN';
+    pickSel.addEventListener('change', recompute);
+    var betLabel = document.createElement('label'); betLabel.textContent = 'Wager';
+    var betInput = document.createElement('input');
+    betInput.type = 'number'; betInput.min = 0; betInput.max = e.points;
+    betInput.value = Math.max(Math.min(cfg.minBet, e.points), Math.round(e.points*0.2/10)*10);
+    betInput.addEventListener('input', recompute);
+    minePicks[e.name] = pickSel; mineBets[e.name] = betInput;
+    card.appendChild(name);
+    card.appendChild(pickLabel); card.appendChild(pickSel);
+    card.appendChild(betLabel); card.appendChild(betInput);
+    mineBox.appendChild(card);
+  });
+
+  function recompute(){
+    var frac = +fracInput.value / 100;
+    fracLabel.textContent = fracInput.value + '%';
+
+    var results = DATA.entries.map(function(e){
+      var key = e.away+'@'+e.home;
+      var game = gamesById[key];
+      var selection = gameSelects[key] ? gameSelects[key].value : (game.outcome || '');
+      var outcome = outcomeForSide(selection, e.side);
+      var spread = spreadForTeam(game, e.side);
+      var projected = e.points;
+      var pending = true;
+      if(outcome != null){
+        pending = false;
+        var pick, bet;
+        if(e.mine){
+          pick = minePicks[e.name].value;
+          bet = clampBet(e.points, +mineBets[e.name].value);
+        } else {
+          pick = 'WIN';
+          bet = clampBet(e.points, e.points*frac);
+        }
+        projected = e.points + scoreBet(spread, pick, bet, outcome);
+      }
+      return {name:e.name, mine:e.mine, points:e.points, projected:projected, pending:pending};
+    });
+    results.sort(function(a,b){ return b.projected - a.projected; });
+
+    tbody.innerHTML = '';
+    results.forEach(function(r, i){
+      var tr = document.createElement('tr');
+      if(r.mine) tr.className = 'mine';
+      var delta = r.projected - r.points;
+      var deltaTxt = r.pending ? '—' : ((delta>=0?'+':'')+Math.round(delta));
+      var deltaCls = r.pending ? '' : (delta>=0 ? 'pos' : 'neg');
+      [String(i+1), r.name, String(r.points), String(Math.round(r.projected))].forEach(function(txt, ci){
+        var td = document.createElement('td');
+        td.textContent = txt;
+        if(ci>=2) td.className = 'mono';
+        tr.appendChild(td);
+      });
+      var deltaTd = document.createElement('td');
+      deltaTd.className = 'mono ' + deltaCls;
+      deltaTd.textContent = deltaTxt;
+      tr.appendChild(deltaTd);
+      tbody.appendChild(tr);
+    });
+  }
+
+  fracInput.addEventListener('input', recompute);
+  recompute();
+})();
+"""
+
+    return (
+        '<section class="entry-section"><h2>Scenario Projector</h2>'
+        '<div class="card"><p class="card-title">Assumptions</p>'
+        '<div id="scenarioGames"></div>'
+        '<div class="scenario-row"><span class="game-label">Field bet % (of current stack)</span>'
+        '<input type="range" id="fieldFrac" min="0" max="60" value="20">'
+        '<span id="fieldFracLabel" class="mono">20%</span></div>'
+        '<div id="scenarioMine" style="margin-top:10px"></div>'
+        '<p class="empty-note" style="margin-top:8px">Field entries are assumed to bet WIN on their '
+        "assigned team at the field % above; games left “Not decided” leave that entry "
+        "unchanged. Spreads reflect whatever's currently recorded (fetch-spread/confirm-spread) "
+        "— pick&rsquo;em if none is set yet. Entirely computed in your browser — nothing "
+        "is sent anywhere.</p></div>"
+        '<div class="card"><p class="card-title">Projected standings</p>'
+        '<div class="table-scroll"><table id="scenarioTable"><thead><tr><th>#</th><th>Entry</th>'
+        "<th>Entering</th><th>Projected</th><th>&Delta;</th></tr></thead><tbody></tbody></table></div>"
+        "</div></section>"
+        f'<script type="application/json" id="scenario-data">{payload_json}</script>'
+        f"<script>{js}</script>"
+    )
+
+
 def _field_summary_section(
     conn: sqlite3.Connection,
     cfg: PoolConfig,
@@ -415,13 +663,14 @@ def render_report_html(
             f'<p class="meta">{meta}generated {generated_at} &middot; static snapshot &mdash; '
             "rerun <code>pool export-html</code> and push to refresh</p></header>",
             _scoreboard_strip(timelines) if timelines else "",
+            _scenario_projector_section(conn, cfg, season, week, include_field_names),
             entry_blocks,
             _field_summary_section(conn, cfg, season, week, include_field_names),
             "<footer>"
-            f"<b>Open assumption &mdash; upset direction:</b> a favorite betting LOSS against a "
-            f"qualifying spread currently counts as a 10&times; upset: "
-            f"<b>{'yes' if cfg.upset_counts_favorite_loss else 'no'}</b> (config-driven, unconfirmed "
-            f"against a settled week).<br>"
+            f"<b>Confirmed &mdash; upset direction:</b> a favorite betting LOSS against a "
+            f"qualifying spread counts as a 10&times; upset, same as an underdog WIN: "
+            f"<b>{'yes' if cfg.upset_counts_favorite_loss else 'no'}</b> "
+            f"(config-driven: upset_counts_favorite_loss).<br>"
             f"<b>Spread source for 10&times; qualification:</b> {_esc(cfg.spread_source_name)}.<br>"
             "Simulation outputs are directional, not precise &mdash; they don't know real future "
             "matchups or real competitor behavior."

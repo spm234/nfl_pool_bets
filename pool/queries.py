@@ -210,3 +210,99 @@ def compute_field_reconstruction(
             )
         )
     return out
+
+
+@dataclass
+class ScenarioEntry:
+    name: str
+    is_mine: bool
+    away_team: str
+    home_team: str
+    assigned_side: str
+    points_entering_week: float
+
+
+@dataclass
+class ScenarioGame:
+    away_team: str
+    home_team: str
+    favorite: Optional[str]
+    margin: float
+    outcome: Optional[str]
+
+
+@dataclass
+class ScenarioData:
+    games: List[ScenarioGame]
+    entries: List[ScenarioEntry]
+
+
+def get_scenario_projection_data(
+    conn: sqlite3.Connection, season_year: int, week_number: int, config: PoolConfig
+) -> ScenarioData:
+    """Everyone (mine + field) with an assignment this week, plus the games
+    they're tied to — the raw material for a client-side 'what if this game
+    goes this way' standings projector. points_entering_week is each entry's
+    standing as of the end of the *previous* week (or start_points for week
+    1), matching what a pre-game hypothetical should be based on.
+    """
+    week_row = conn.execute(
+        "SELECT id FROM week WHERE season_year = ? AND week_number = ?",
+        (season_year, week_number),
+    ).fetchone()
+    if week_row is None:
+        return ScenarioData(games=[], entries=[])
+    week_id = week_row["id"]
+
+    prev_week_row = conn.execute(
+        """
+        SELECT id FROM week WHERE season_year = ? AND week_number < ?
+        ORDER BY week_number DESC LIMIT 1
+        """,
+        (season_year, week_number),
+    ).fetchone()
+
+    assignments = conn.execute(
+        """
+        SELECT e.display_name, e.is_mine, e.id AS entry_id, a.assigned_side,
+               g.away_team, g.home_team, g.favorite, g.spread_margin, g.outcome
+        FROM assignment a
+        JOIN entry e ON e.id = a.entry_id
+        JOIN game g ON g.id = a.game_id
+        WHERE g.week_id = ?
+        ORDER BY e.is_mine DESC, e.display_name
+        """,
+        (week_id,),
+    ).fetchall()
+
+    games: dict = {}
+    entries: List[ScenarioEntry] = []
+    for r in assignments:
+        key = (r["away_team"], r["home_team"])
+        if key not in games:
+            games[key] = ScenarioGame(
+                away_team=r["away_team"], home_team=r["home_team"],
+                favorite=r["favorite"], margin=r["spread_margin"] or 0, outcome=r["outcome"],
+            )
+
+        points = None
+        if prev_week_row is not None:
+            prev_row = conn.execute(
+                "SELECT points FROM entry_week_points WHERE entry_id = ? AND week_id = ?",
+                (r["entry_id"], prev_week_row["id"]),
+            ).fetchone()
+            points = prev_row["points"] if prev_row else None
+        elif week_number == 1:
+            points = config.start_points
+        if points is None:
+            continue  # no known starting point for this entry — skip rather than guess
+
+        entries.append(
+            ScenarioEntry(
+                name=r["display_name"], is_mine=bool(r["is_mine"]),
+                away_team=r["away_team"], home_team=r["home_team"],
+                assigned_side=r["assigned_side"], points_entering_week=points,
+            )
+        )
+
+    return ScenarioData(games=list(games.values()), entries=entries)

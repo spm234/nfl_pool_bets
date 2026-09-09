@@ -72,5 +72,36 @@ def test_render_report_escapes_html_in_names(conn):
     importer.import_standings(conn, 2026, 1, "<script>alert(1)</script>, 350\n")
     cfg = PoolConfig.load(conn)
     out = render_report_html(conn, cfg, season=2026, week=1, include_field_names=True)
-    assert "<script>alert" not in out
-    assert "&lt;script&gt;" in out
+    # Never appears verbatim (would execute as HTML markup or terminate the
+    # embedded JSON <script> tag early).
+    assert "<script>alert(1)</script>" not in out
+    # HTML-context: the field table must escape it properly.
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in out
+    # JSON-context: the embedded scenario-projector payload must use the
+    # "<\/script>" escape rather than a literal "</script>" sequence.
+    assert '<script>alert(1)<\\/script>' in out
+
+
+def test_scenario_projector_included_by_default(conn):
+    _seed(conn)
+    cfg = PoolConfig.load(conn)
+    out = render_report_html(conn, cfg, season=2026, week=1)
+    assert "Scenario Projector" in out
+    assert '"name": "SPM"' in out
+    assert '"name": "Always Hot"' in out
+    assert '"away": "Atlanta"' in out
+
+
+def test_scenario_projector_respects_no_field_names(conn):
+    _seed(conn)
+    cfg = PoolConfig.load(conn)
+    out = render_report_html(conn, cfg, season=2026, week=1, include_field_names=False)
+    assert '"name": "SPM"' in out
+    assert '"name": "Always Hot"' not in out
+
+
+def test_scenario_projector_absent_without_week(conn):
+    _seed(conn)
+    cfg = PoolConfig.load(conn)
+    out = render_report_html(conn, cfg)
+    assert "Scenario Projector" not in out
