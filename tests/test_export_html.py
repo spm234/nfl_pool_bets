@@ -55,7 +55,18 @@ def test_render_report_includes_my_entries_and_scenarios(conn):
 
 
 def test_render_report_escapes_html_in_names(conn):
-    importer.import_standings(conn, 2026, 1, "<script>alert(1)</script>, 150\n")
+    # Must have an assignment (not just standings) to actually appear in the
+    # field reconstruction table — otherwise this test would pass trivially
+    # without ever exercising the escaping path.
+    importer.import_schedule(conn, 2026, 1, "Atlanta, Pittsburgh\n")
+    importer.import_assignments(
+        conn, 2026, 1, "<script>alert(1)</script>, Atlanta\n"
+    )
+    importer.record_game_result(
+        conn, 2026, 1, "Atlanta", "Pittsburgh", favorite="away", margin=12, outcome="home"
+    )
+    importer.import_standings(conn, 2026, 1, "<script>alert(1)</script>, 350\n")
     cfg = PoolConfig.load(conn)
     out = render_report_html(conn, cfg, season=2026, week=1, include_field_names=True)
     assert "<script>alert" not in out
+    assert "&lt;script&gt;" in out
