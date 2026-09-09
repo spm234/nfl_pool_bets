@@ -107,6 +107,38 @@ Schedule `weekly` with cron for a hands-off Thursday/Friday check, e.g.:
 wired up automatically since NFL week numbers don't line up with ISO weeks;
 pass `--week` explicitly if the log ever looks off.)
 
+## Publishing a static snapshot (GitHub Pages)
+
+`pool export-html` renders your entries' timelines, this week's
+recommendations, and a scenario-lab comparison across four bet-sizing
+policies into a single static page — no server, no live DB access. This is
+a **snapshot**, not a live view: rerun the command and push whenever you
+want the published page to reflect the current state.
+
+```
+python -m pool.cli export-html --season 2026 --week 3 --out docs/index.html
+git add docs/index.html && git commit -m "Update weekly snapshot" && git push
+```
+
+By default the export **includes the full field standings/reconstruction**
+(other pool members' names and points) — pass `--no-field-names` to reduce
+it to aggregate counts only if you'd rather not publish that.
+
+**Important**: GitHub Pages sites are public URLs by anyone with the link,
+even when published from a private repository — GitHub only restricts Pages
+visibility to org members on Enterprise Cloud. This repo is private, but the
+published page itself won't be access-controlled unless you're on that plan.
+
+To turn on Pages for this repo (one-time, done in the GitHub UI — there's no
+API path wired into this tool for it):
+
+1. On GitHub: **Settings → Pages**.
+2. Under "Build and deployment" → Source, choose **Deploy from a branch**.
+3. Branch: pick the branch this project lives on (e.g. `claude/new-session-f661ve`,
+   or `main` once merged) — folder: **/docs**.
+4. Save. GitHub will give you a URL like
+   `https://spm234.github.io/nfl_pool_bets/` within a minute or two.
+
 ## Live data (Phase 4) — what was built and what wasn't
 
 - **Spread estimates**: `pool/live_data.py` fetches from

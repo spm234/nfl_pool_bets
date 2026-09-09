@@ -10,6 +10,7 @@ from typing import Optional
 
 from . import db, importer, live_data
 from .config import PoolConfig
+from .export_html import render_report_html
 from .profiles import build_competitor_profiles
 from .queries import compute_field_reconstruction, compute_my_entry_timeline
 from .recommend import build_weekly_recommendations
@@ -308,6 +309,25 @@ def cmd_weekly(args):
     conn.close()
 
 
+def cmd_export_html(args):
+    conn = db.connect(args.db)
+    cfg = PoolConfig.load(conn)
+    html_text = render_report_html(
+        conn,
+        cfg,
+        season=args.season,
+        week=args.week,
+        include_field_names=args.include_field_names,
+    )
+    out_path = Path(args.out)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(html_text)
+    print(f"Wrote static report to {out_path}")
+    if not args.include_field_names:
+        print("(field entry names/points omitted per --no-field-names)")
+    conn.close()
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="pool", description="Office-Pool-4-Fun strategy console")
     p.add_argument("--db", default=str(db.DEFAULT_DB_PATH), help="Path to the SQLite database")
@@ -392,6 +412,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("profiles", help="Show thin competitor profiles")
     sp.set_defaults(func=cmd_profiles)
+
+    sp = sub.add_parser("export-html", help="Render a static HTML snapshot (e.g. for GitHub Pages)")
+    sp.add_argument("--season", type=int, default=None)
+    sp.add_argument("--week", type=int, default=None)
+    sp.add_argument("--out", default="docs/index.html")
+    sp.add_argument(
+        "--no-field-names",
+        dest="include_field_names",
+        action="store_false",
+        default=True,
+        help="Omit per-entry field standings/reconstruction, showing only aggregate counts "
+        "(full field names/points are included by default — note this is public info about "
+        "other pool members if the export is published somewhere public)",
+    )
+    sp.set_defaults(func=cmd_export_html)
 
     sp = sub.add_parser("weekly", help="Weekly workflow: refresh lines, prompt, recommend")
     sp.add_argument("--season", type=int, required=True)
