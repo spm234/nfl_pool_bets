@@ -342,6 +342,48 @@ All commands take `--db path/to/loser_pool.db` (defaults to
 `./loser_pool.db` — a separate file from the Office-Pool-4-Fun tool's
 `pool.db`, so the two never collide).
 
+### Connecting to the pool operator's Google Sheet
+
+The pool tracks everyone's picks in a shared Google Sheet ("Loser Pool
+26-27") — one row per entry, one column per period (`Week 1`.."Week 18",
+then `Wild Card`/`Divisional`/`Conference`/`Super Bowl` for the playoffs),
+cell = the team that entry picked-to-lose that period, blank if not
+picked yet. This tool doesn't call the Google Sheets API itself — no
+service-account/OAuth setup lives in this repo, which would be a lot of
+credential overhead for what's really a one-grid CSV — so the "connection"
+works the same way every other importer in this repo does: whoever has
+Drive access (Claude, in a chat session, or a person exporting manually)
+pulls the sheet's CSV export and feeds it to `loser_pool/sheets_sync.py`.
+In a Claude session with Google Drive connected, just ask to sync/refresh
+the sheet and this happens automatically.
+
+**Access note**: as of this integration, the sheet is owned by the pool
+operator with read access shared out — so this can pull everyone's picks
+for tracking/ownership stats, but can't write a recommendation back into
+their sheet (that would need to be granted edit access, or you keep your
+own picks in a separate sheet/file).
+
+```
+python -m loser_pool.cli import-sheet-picks --season 2026 --file loser_pool_sheet.csv
+python -m loser_pool.cli sheet-ownership --file loser_pool_sheet.csv --period "Week 1"
+```
+
+- `import-sheet-picks` bulk-applies every non-blank cell via the same
+  `picks.record_pick` path as a manual `record-pick` — same validation
+  (used-team, elimination, schedule match), errors collected per-row
+  instead of aborting the whole sync. Requires that week's schedule
+  already imported (`import-schedule`) so picks can resolve against a
+  real game.
+- `sheet-ownership` computes current field pick-ownership % per team for
+  one period straight from the sheet CSV — no DB needed. This is
+  clevanalytics' "leverage vs. the field" idea in miniature: with a
+  split-pot format, knowing how much of the field shares your pick matters
+  for how big a slice survives with you. It's *current* ownership, not
+  clevanalytics' survival-adjusted *projected* ownership for a future week
+  (which needs modeling who's still alive by then) — a reasonable next
+  step once there's enough settled-week history in this tool's own DB to
+  drive that projection, not something to fake without it.
+
 ### What's deliberately thin here too
 
 - **Field-wide simulation** — `simulation.py` models one entry's own

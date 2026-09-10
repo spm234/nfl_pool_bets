@@ -11,6 +11,7 @@ from typing import Optional
 from . import db, importer, live_data, picks
 from .config import LoserPoolConfig
 from .optimizer import full_season_plan, recommend_week
+from .sheets_sync import parse_pool_sheet_csv, pick_ownership, sync_picks_from_sheet
 
 
 def _read_text(file_arg: Optional[str]) -> str:
@@ -184,6 +185,30 @@ def cmd_playoff_reset(args):
     conn.close()
 
 
+def cmd_import_sheet_picks(args):
+    conn = db.connect(args.db)
+    text = _read_text(args.file)
+    result = sync_picks_from_sheet(conn, args.season, text)
+    print(f"Applied {result.applied} picks ({result.skipped_blank} blank cells skipped).")
+    for e in result.errors:
+        print(f"  SKIPPED: {e.entry} / {e.period} -> {e.team}: {e.reason}", file=sys.stderr)
+    conn.close()
+
+
+def cmd_sheet_ownership(args):
+    text = _read_text(args.file)
+    rows = parse_pool_sheet_csv(text)
+    ownership = pick_ownership(rows, args.period)
+    if not ownership:
+        print(f"No picks recorded yet for '{args.period}'.")
+    for o in ownership:
+        print(
+            f"{o.team}: {o.count} picks — {o.fraction_of_submitted:.1%} of submitted, "
+            f"{o.fraction_of_all_entries:.1%} of full field"
+        )
+    print(f"({len(rows)} entries on the sheet)")
+
+
 def cmd_status(args):
     conn = db.connect(args.db)
     if args.entry:
@@ -335,6 +360,23 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--after-week", type=int, required=True)
     sp.add_argument("--note", default=None)
     sp.set_defaults(func=cmd_playoff_reset)
+
+    sp = sub.add_parser(
+        "import-sheet-picks",
+        help="Bulk-apply picks from the pool operator's Google Sheet CSV export "
+        "(name row, one column per week/playoff round — see README)",
+    )
+    sp.add_argument("--season", type=int, required=True)
+    sp.add_argument("--file", help="Read from this file instead of stdin")
+    sp.set_defaults(func=cmd_import_sheet_picks)
+
+    sp = sub.add_parser(
+        "sheet-ownership",
+        help="Field pick-ownership % for one period, straight from the sheet CSV (no DB needed)",
+    )
+    sp.add_argument("--file", help="Read from this file instead of stdin")
+    sp.add_argument("--period", required=True, help="e.g. 'Week 1' or 'Wild Card'")
+    sp.set_defaults(func=cmd_sheet_ownership)
 
     sp = sub.add_parser("status", help="Show entry lives/elimination/used-teams")
     sp.add_argument("--entry", default=None, help="Omit to show all entries")

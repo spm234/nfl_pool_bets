@@ -74,17 +74,25 @@ def record_pick(
     if game is None:
         raise PickError(f"No game found for '{team}' in season {season_year} week {week_number}.")
 
-    if team in used_teams(conn, entry_id, season_year):
-        raise PickError(f"{entry_display_name} has already used {team} this cycle.")
-
     existing = conn.execute(
-        "SELECT id, result FROM lp_pick WHERE entry_id = ? AND week_id = ?", (entry_id, week_id)
+        "SELECT id, team_picked, result FROM lp_pick WHERE entry_id = ? AND week_id = ?",
+        (entry_id, week_id),
     ).fetchone()
     if existing and existing["result"] != "pending":
         raise PickError(
             f"{entry_display_name}'s week {week_number} pick is already settled as "
             f"'{existing['result']}' — can't change it."
         )
+
+    # A still-pending pick for THIS week is about to be overwritten, so its
+    # own team shouldn't count as "already used" against the new pick —
+    # otherwise re-syncing/correcting an unsettled pick (even to the same
+    # team) would spuriously look like a team-reuse violation.
+    used = used_teams(conn, entry_id, season_year)
+    if existing:
+        used.discard(existing["team_picked"])
+    if team in used:
+        raise PickError(f"{entry_display_name} has already used {team} this cycle.")
 
     if existing:
         conn.execute("UPDATE lp_pick SET team_picked = ? WHERE id = ?", (team, existing["id"]))
