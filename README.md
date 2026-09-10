@@ -227,6 +227,133 @@ whatever source is confirming your spreads doesn't match the pool
 operator's actual snapshot (assumption #1 above) — the direction and
 assignment rules are already confirmed, so they're not the likely culprit.
 
+## The Loser Pool tool (`loser_pool/`)
+
+A second, completely separate tool in this repo — different game, different
+DB file (`loser_pool.db`), different schema (`sql/loser_schema.sql`), own
+CLI (`python -m loser_pool.cli`). It's the loser-pool analog of
+[clevanalytics' survivor optimizer](https://clevanalytics.com/survivor-optimizer/):
+each week you pick one team you think will **lose**; picking a team that
+instead wins costs you a life.
+
+### The rules this models
+
+- **$30 buy-in, 2 lives per entry** (the buy-in prepays a buy-back). A
+  team win/tie(*) on your pick burns a life; your second such bust
+  eliminates the entry. Config: `lives_per_entry` (default 2).
+- **No team reuse** — once an entry has picked a team, it's unavailable to
+  them again, regardless of whether that pick survived or busted.
+- **Playoff reset**: if the pool reaches the playoffs with no sole winner,
+  every remaining entry's used-team list clears and they can pick from the
+  playoff field. Trigger this via `loser_pool.cli playoff-reset
+  --after-week <last regular-season week>` — it doesn't touch anyone's
+  lives, only which teams count as "used."
+- (*) **Tie handling is an open assumption** (`tie_treated_as`, default
+  `'bust'`) — ties are rare enough (roughly one every couple of seasons)
+  that it's fine to leave this as a documented guess until it actually
+  comes up; flip it with `config-set --tie-treated-as survive` if the pool
+  operator confirms a tie is a push instead.
+
+### Data source — why this isn't fetching from clevanalytics
+
+Both clevanalytics pages you pointed at (the optimizer and the
+season-long-spreads page) are blocked by this environment's network
+egress proxy — not a login wall, just an outright block at the domain
+level — so neither could be inspected or scraped from here. Two
+consequences:
+
+1. **No clevanalytics-derived power ratings.** Instead, team strength is
+   tracked as an **Elo rating** (`loser_pool/spread_model.py`,
+   `loser_pool/ratings.py`), FiveThirtyEight-style: a margin-of-victory
+   multiplier on every update, `elo_home_advantage` (default 48) added to
+   the home team before comparing, `elo_k_factor` (default 20) controlling
+   how fast ratings move. All 32 teams start flat at `elo_initial_rating`
+   (1500) since there's no built-in preseason source — seed real
+   preseason strength yourself via `import-win-totals` (a projected
+   win-total per team, e.g. from a sportsbook's season win-total market,
+   converted to Elo via the standard ~25-points-per-win heuristic) or
+   `import-elo-ratings` (literal ratings) before week 1. From there,
+   ratings update automatically off real results (`fetch-result` /
+   `record-result` both roll Elo forward via `ratings.apply_elo_after_result`).
+2. **Market spreads still come from The Odds API** (reusing
+   `pool/live_data.py`'s fetch functions as-is — see that module's own
+   docs for the API/key details) for whatever near-term window it covers.
+   Any game with a recorded market spread uses that (normal-CDF margin
+   model, `margin_std_dev`, default 13.86) instead of the Elo projection —
+   Elo only fills in for games further out than the odds board reaches.
+
+If you can get clevanalytics' actual power ratings or season-long spread
+numbers into a file yourself (copy/paste, export, whatever your browser
+can reach that this sandbox can't), `import-win-totals` / `import-elo-ratings`
+will take them directly — you don't need to wait for the Odds-API/Elo path
+to catch up if you have a better number.
+
+### The optimizer
+
+Two layers (`loser_pool/optimizer.py`):
+
+1. **`full-plan`** — the theoretical best single sequence of picks across a
+   week range with *unlimited* lives: maximize the product of each picked
+   team's weekly loss probability, one team per week, no repeats. This is
+   exactly the classic linear assignment problem, solved with scipy's
+   Hungarian-algorithm implementation (`scipy.optimize.linear_sum_assignment`)
+   rather than a hand-rolled one — a subtly-wrong assignment algorithm here
+   would just look like "a slightly worse plan," which is a bad kind of bug
+   to have hiding in a betting tool. Reference-only: it ignores the 2-lives
+   mechanic on purpose.
+2. **`recommend`** — the actual weekly call, which DOES account for lives
+   remaining and already-used teams. It ranks this week's available teams
+   by raw loss probability, then (when given `--through-week`) re-scores
+   the top candidates by Monte Carlo season-survival probability
+   (`loser_pool/simulation.py`) — because with 2 lives, spending a
+   good-but-not-best team now to preserve a much bigger future mismatch
+   can beat always taking this week's single best option.
+
+### CLI usage
+
+```
+pip install -r requirements.txt
+python -m loser_pool.cli init-db
+
+# Seed preseason strength (pick one) before week 1:
+python -m loser_pool.cli import-win-totals --season 2026 --week 1 --file win_totals.csv   # "Team, WinTotal" per line
+python -m loser_pool.cli import-elo-ratings --season 2026 --week 1 --file ratings.csv     # "Team, Rating" per line
+
+python -m loser_pool.cli import-schedule --season 2026 --week 1 --file week1_schedule.txt  # "Away, Home" per line
+python -m loser_pool.cli add-entry --name SPM --mine
+python -m loser_pool.cli add-entry --name Rival1
+
+# Market spread when The Odds API has it yet; Elo fills in otherwise —
+# recommend/full-plan don't need this step run first, but it sharpens them.
+python -m loser_pool.cli fetch-spread --season 2026 --week 1 --away Jaguars --home Browns
+
+python -m loser_pool.cli recommend --season 2026 --week 1 --entry SPM --through-week 4
+python -m loser_pool.cli full-plan --season 2026 --entry SPM --from-week 1 --through-week 18
+
+python -m loser_pool.cli record-pick --season 2026 --week 1 --entry SPM --team Jaguars --mine
+python -m loser_pool.cli fetch-result --season 2026 --week 1 --away Jaguars --home Browns
+python -m loser_pool.cli settle-week --season 2026 --week 1
+
+python -m loser_pool.cli status --season 2026
+python -m loser_pool.cli playoff-reset --after-week 18 --note "no winner after regular season"
+```
+
+All commands take `--db path/to/loser_pool.db` (defaults to
+`./loser_pool.db` — a separate file from the Office-Pool-4-Fun tool's
+`pool.db`, so the two never collide).
+
+### What's deliberately thin here too
+
+- **Field-wide simulation** — `simulation.py` models one entry's own
+  survival odds under a simple greedy pick policy, not the whole field's
+  behavior (who else survives, split-pot odds). Same call the
+  Office-Pool-4-Fun tool's simulation layer makes: modeling a whole field's
+  pick tendencies needs assumptions that aren't knowable this far from the
+  season, whereas "how likely am I to survive with 2 lives on this plan"
+  only needs data this tool already has.
+- **No HTML export yet** for this tool (unlike `pool export-html`) — CLI
+  only for now.
+
 ## What's deliberately thin
 
 - **Competitor profiles** (`pool/profiles.py`): built from the top-confidence
