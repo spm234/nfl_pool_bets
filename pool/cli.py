@@ -314,12 +314,10 @@ def cmd_weekly(args):
         timeline = compute_my_entry_timeline(conn, entry_id, cfg)
         current_points = timeline.current_points
         spread = margin if favorite != side else -margin
-        is_upset_opportunity = abs(spread) >= cfg.upset_spread_threshold
         entry_inputs.append(
             {
                 "name": name,
                 "current_points": current_points,
-                "is_upset_opportunity": is_upset_opportunity,
                 "away": away,
                 "home": home,
                 "side": side,
@@ -344,13 +342,17 @@ def cmd_weekly(args):
         start_points=cfg.start_points,
     )
     recs = build_weekly_recommendations(
-        entry_inputs, assumptions, cfg.payouts, cfg.entry_fee, aggression=args.aggression
+        entry_inputs, assumptions, cfg.payouts, cfg.entry_fee, aggression=args.aggression,
+        upset_threshold=cfg.upset_spread_threshold,
+        upset_multiplier=cfg.upset_multiplier,
+        counts_favorite_loss=cfg.upset_counts_favorite_loss,
     )
 
     print(f"\n=== Week {args.week} recommendations ===")
     for e, rec in zip(entry_inputs, recs):
         print(f"\n{rec.entry_name} — {e['away']} @ {e['home']} (you: {e['side']}), spread {e['spread']}")
         print(f"  Current points: {rec.current_points}")
+        print(f"  Recommended pick: {rec.recommended_pick}")
         print(f"  Recommended bet: {rec.recommended_bet}")
         print(f"  Reasoning: {rec.recommended_pick_reasoning}")
         s = rec.sim_result

@@ -278,12 +278,13 @@ def _entry_assignment(conn, entry_id, season, week):
 def _recommendation_slip(rec, e, cfg) -> str:
     s = rec.sim_result
     spread_html = _spread_label(e["spread"], cfg.upset_spread_threshold)
+    pick_color = "var(--win)" if rec.recommended_pick == "WIN" else "var(--loss)"
     return (
         '<div class="card"><p class="card-title">This week&rsquo;s pick</p>'
         '<div class="slip">'
         '<div class="slip-half">'
-        f'<p class="slip-label">{_esc(e["away"])} @ {_esc(e["home"])} &middot; you: {_esc(e["side"])}</p>'
-        f'<p class="slip-value">{spread_html}</p>'
+        f'<p class="slip-label">{_esc(e["away"])} @ {_esc(e["home"])} &middot; you: {_esc(e["side"])} &middot; {spread_html}</p>'
+        f'<p class="slip-value" style="color:{pick_color}">{_esc(rec.recommended_pick)}</p>'
         f'<p class="slip-reasoning">Current stack: <b class="mono">{rec.current_points:g}</b> pts</p>'
         "</div>"
         '<div class="slip-divider"></div>'
@@ -373,7 +374,6 @@ def _entry_sections(
                 spread = margin if favorite != side else -margin
                 entry_input = {
                     "name": e["display_name"], "current_points": tl.current_points,
-                    "is_upset_opportunity": abs(spread) >= cfg.upset_spread_threshold,
                     "away": assignment["away_team"], "home": assignment["home_team"],
                     "side": side, "spread": spread,
                 }
@@ -382,7 +382,10 @@ def _entry_sections(
                     min_bet=cfg.min_bet, start_points=cfg.start_points,
                 )
                 rec = build_weekly_recommendations(
-                    [entry_input], assumptions, cfg.payouts, cfg.entry_fee, seed=1
+                    [entry_input], assumptions, cfg.payouts, cfg.entry_fee, seed=1,
+                    upset_threshold=cfg.upset_spread_threshold,
+                    upset_multiplier=cfg.upset_multiplier,
+                    counts_favorite_loss=cfg.upset_counts_favorite_loss,
                 )[0]
                 section.append(_recommendation_slip(rec, entry_input, cfg))
             else:

@@ -227,6 +227,25 @@ whatever source is confirming your spreads doesn't match the pool
 operator's actual snapshot (assumption #1 above) — the direction and
 assignment rules are already confirmed, so they're not the likely culprit.
 
+## Pick recommendation: WIN vs LOSS, actually compared
+
+`recommend.choose_pick` (`pool/recommend.py`) compares betting WIN vs LOSS
+on your assigned team and recommends whichever has higher expected value —
+it does not default to WIN. Win probability comes from a logistic model
+driven by the recorded spread (`scoring.win_prob_from_spread`, ported from
+the original prototype but previously unused anywhere). This matters
+because a favorite betting LOSS against a qualifying spread pays the same
+10x upset bonus as an underdog betting WIN (confirmed rule, see above) —
+sometimes fading your own team is the better play, and the tool will now
+actually say so.
+
+This compares linear expected points only — it does not account for how
+variance interacts with the pool's top-10 payout structure (a long-shot
+upset can be worth more than its raw EV suggests late in the season when
+you're chasing 1st, and worth less if you're just trying to survive). The
+reasoning text shown alongside each recommendation states both picks' EV
+per point so you can see the comparison, not just the conclusion.
+
 ## What's deliberately thin
 
 - **Competitor profiles** (`pool/profiles.py`): built from the top-confidence
