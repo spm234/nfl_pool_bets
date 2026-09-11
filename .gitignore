@@ -1,7 +1,7 @@
 __pycache__/
 *.pyc
 .pytest_cache/
-pool.db
-*.db
+# pool.db is intentionally tracked (not ignored) — the GitHub Action that
+# fetches spreads unattended commits its updates back to this file.
 .venv/
 venv/

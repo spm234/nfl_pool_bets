@@ -157,6 +157,32 @@ API path wired into this tool for it):
 4. Save. GitHub will give you a URL like
    `https://spm234.github.io/nfl_pool_bets/` within a minute or two.
 
+## Fetching spreads without running Python yourself
+
+`.github/workflows/fetch-spreads.yml` is a click-to-run GitHub Action
+(Actions tab → "Fetch spreads" → "Run workflow", enter season/week) that
+fetches an early spread estimate for every game one of "my" entries is
+assigned to that week, and commits the updated `pool.db` back to the repo
+automatically — no local Python, no terminal.
+
+One-time setup:
+1. **Settings → Secrets and variables → Actions → New repository secret**,
+   name it `THE_ODDS_API_KEY`, paste your key.
+2. That's it — the workflow already exists in this repo.
+
+This is why `pool.db` is tracked in git (not gitignored) as of this
+change: for the Action's fetch to persist anywhere, the database has to
+live somewhere the Action can commit back to. The tradeoff is real and
+worth knowing — your full season's data (assignments, picks, field
+standings) now lives in git history, not just the periodic HTML snapshots
+already published to Pages. If you'd rather keep the database local-only,
+the alternative is running `fetch-my-spreads` (or `fetch-spread` for one
+game at a time) yourself, same as any other CLI command.
+
+`fetch-my-spreads --season Y --week N` (the command the Action runs) is
+also available locally — it fetches for every game any "my" entry is
+assigned to that week, without needing per-game `--away`/`--home` args.
+
 ## Live data (Phase 4) — what was built and what wasn't
 
 - **Spread estimates**: `pool/live_data.py` fetches from

@@ -191,6 +191,48 @@ def cmd_fetch_spread(args):
     conn.close()
 
 
+def cmd_fetch_my_spreads(args):
+    """Fetches an early spread estimate for every game one of 'my' entries
+    is assigned to this week — no per-game args needed, since it reads the
+    assignments already in the DB. Built for unattended use (e.g. a GitHub
+    Action triggered with just --season/--week), not just interactive use.
+    """
+    conn = db.connect(args.db)
+    games = conn.execute(
+        """
+        SELECT DISTINCT g.away_team, g.home_team
+        FROM assignment a
+        JOIN entry e ON e.id = a.entry_id
+        JOIN game g ON g.id = a.game_id
+        WHERE e.is_mine = 1 AND g.week_id = (
+            SELECT id FROM week WHERE season_year = ? AND week_number = ?
+        )
+        """,
+        (args.season, args.week),
+    ).fetchall()
+
+    if not games:
+        print(f"No assignments logged for any of my entries in week {args.week} yet — nothing to fetch.")
+        conn.close()
+        return
+
+    failures = 0
+    for g in games:
+        away, home = g["away_team"], g["home_team"]
+        try:
+            estimate = live_data.fetch_spread_estimate(away, home, api_key=args.api_key)
+        except live_data.LiveDataError as e:
+            print(f"  {away} @ {home}: could not fetch ({e})", file=sys.stderr)
+            failures += 1
+            continue
+        live_data.save_spread_snapshot(conn, args.season, args.week, away, home, estimate)
+        print(f"  {away} @ {home}: {estimate.favorite} favored by {estimate.margin} [{estimate.source}] (early estimate)")
+
+    conn.close()
+    if failures:
+        sys.exit(1)
+
+
 def cmd_confirm_spread(args):
     conn = db.connect(args.db)
     cfg = PoolConfig.load(conn)
@@ -482,6 +524,16 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--home", required=True)
     sp.add_argument("--api-key", default=None)
     sp.set_defaults(func=cmd_fetch_spread)
+
+    sp = sub.add_parser(
+        "fetch-my-spreads",
+        help="Fetch early spread estimates for every game any 'my' entry is assigned to "
+        "this week, no per-game args needed — built for unattended/scripted use",
+    )
+    sp.add_argument("--season", type=int, required=True)
+    sp.add_argument("--week", type=int, required=True)
+    sp.add_argument("--api-key", default=None)
+    sp.set_defaults(func=cmd_fetch_my_spreads)
 
     sp = sub.add_parser("confirm-spread", help="Record a manually-confirmed, authoritative spread")
     sp.add_argument("--season", type=int, required=True)
