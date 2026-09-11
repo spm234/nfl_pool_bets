@@ -99,6 +99,22 @@ def cmd_import_week_csv(args):
     conn.close()
 
 
+def cmd_import_week_sheet(args):
+    conn = db.connect(args.db)
+    try:
+        text = live_data.fetch_google_sheet_csv(args.sheet, gid=args.gid)
+    except live_data.LiveDataError as e:
+        print(f"Could not fetch the sheet: {e}", file=sys.stderr)
+        sys.exit(1)
+    try:
+        count = importer.import_week_csv(conn, args.season, args.week, text)
+    except ValueError as e:
+        print(f"Import failed: {e}", file=sys.stderr)
+        sys.exit(1)
+    print(f"Imported {count} entries from Google Sheet for week {args.week}.")
+    conn.close()
+
+
 def cmd_record_result(args):
     conn = db.connect(args.db)
     # Only pass fields that were actually given, so e.g. recording the
@@ -406,6 +422,17 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--week", type=int, required=True)
     sp.add_argument("--file", help="Read from this file instead of stdin")
     sp.set_defaults(func=cmd_import_week_csv)
+
+    sp = sub.add_parser(
+        "import-week-sheet",
+        help="Same as import-week, but fetched live from a public Google Sheet "
+        "(must be shared 'Anyone with the link can view')",
+    )
+    sp.add_argument("--season", type=int, required=True)
+    sp.add_argument("--week", type=int, required=True)
+    sp.add_argument("--sheet", required=True, help="Sheet ID or full share URL")
+    sp.add_argument("--gid", default=None, help="Specific tab's gid, if not the first tab")
+    sp.set_defaults(func=cmd_import_week_sheet)
 
     sp = sub.add_parser("record-result", help="Record a game's spread and/or outcome")
     sp.add_argument("--season", type=int, required=True)

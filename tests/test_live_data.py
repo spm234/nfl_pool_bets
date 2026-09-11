@@ -161,3 +161,51 @@ def test_fetch_completed_score_no_match_raises(monkeypatch):
     monkeypatch.setitem(sys.modules, "requests", _fake_scores_requests([]))
     with pytest.raises(live_data.LiveDataError, match="No score data found"):
         live_data.fetch_completed_score("Atlanta", "Pittsburgh", api_key="test-key")
+
+
+def test_extract_google_sheet_id_from_full_url():
+    url = "https://docs.google.com/spreadsheets/d/1VVnewww8IAjkrMpDjJzl73iKK2DHlqVRN1wJgaWjDJo/edit?usp=sharing"
+    assert live_data.extract_google_sheet_id(url) == "1VVnewww8IAjkrMpDjJzl73iKK2DHlqVRN1wJgaWjDJo"
+
+
+def test_extract_google_sheet_id_from_bare_id():
+    assert live_data.extract_google_sheet_id("abc123") == "abc123"
+
+
+class _FakeSheetResponse:
+    def __init__(self, status_code, content_type, text):
+        self.status_code = status_code
+        self.headers = {"Content-Type": content_type}
+        self.text = text
+
+
+def test_fetch_google_sheet_csv_success(monkeypatch):
+    csv_text = "Rank,Team Name,Total Pts,Away,Home\n1,SPM,150,Atlanta,Pittsburgh\n"
+    fake_requests = types.SimpleNamespace(
+        get=lambda url, params=None, timeout=None: _FakeSheetResponse(200, "text/csv", csv_text),
+        RequestException=Exception,
+    )
+    monkeypatch.setitem(sys.modules, "requests", fake_requests)
+    result = live_data.fetch_google_sheet_csv("some-id")
+    assert result == csv_text
+
+
+def test_fetch_google_sheet_csv_permission_denied_raises(monkeypatch):
+    html = "<html><body>Sign in to continue</body></html>"
+    fake_requests = types.SimpleNamespace(
+        get=lambda url, params=None, timeout=None: _FakeSheetResponse(200, "text/html", html),
+        RequestException=Exception,
+    )
+    monkeypatch.setitem(sys.modules, "requests", fake_requests)
+    with pytest.raises(live_data.LiveDataError, match="Anyone with the link"):
+        live_data.fetch_google_sheet_csv("some-id")
+
+
+def test_fetch_google_sheet_csv_http_error_raises(monkeypatch):
+    fake_requests = types.SimpleNamespace(
+        get=lambda url, params=None, timeout=None: _FakeSheetResponse(404, "text/html", "not found"),
+        RequestException=Exception,
+    )
+    monkeypatch.setitem(sys.modules, "requests", fake_requests)
+    with pytest.raises(live_data.LiveDataError, match="HTTP 404"):
+        live_data.fetch_google_sheet_csv("some-id")

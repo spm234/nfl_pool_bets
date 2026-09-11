@@ -272,3 +272,66 @@ def confirm_spread(
     )
     conn.commit()
     return game_id
+
+
+_SHEET_ID_RE_MARKERS = ("/d/", "/spreadsheets/")
+
+
+def extract_google_sheet_id(sheet_id_or_url: str) -> str:
+    """Accepts either a bare Sheet ID or a full share URL
+    (https://docs.google.com/spreadsheets/d/<ID>/edit?usp=sharing) and
+    returns just the ID.
+    """
+    s = sheet_id_or_url.strip()
+    if "/d/" in s:
+        s = s.split("/d/", 1)[1]
+        s = s.split("/", 1)[0]
+    return s
+
+
+def fetch_google_sheet_csv(sheet_id_or_url: str, *, gid: Optional[str] = None, timeout: int = 15) -> str:
+    """Fetches a Google Sheet's data as CSV via its public export URL —
+    plain HTTP GET, no OAuth. This only works if the sheet is shared as
+    "Anyone with the link can view" (or more open); a restricted sheet
+    returns an HTML login/permission page instead of CSV, which this
+    detects and raises on rather than silently importing garbage.
+
+    This is a genuinely different case from the officepool4fun.com
+    situation: you control this sheet's sharing setting directly, so
+    there's no login-wall-workaround question — if it's shared openly,
+    a plain GET is exactly what "shared with a link" is for.
+    """
+    try:
+        import requests
+    except ImportError as e:
+        raise LiveDataError(
+            "The 'requests' package is required for Google Sheets fetching. "
+            "Install it with: pip install requests"
+        ) from e
+
+    sheet_id = extract_google_sheet_id(sheet_id_or_url)
+    url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export"
+    params = {"format": "csv"}
+    if gid:
+        params["gid"] = gid
+
+    try:
+        resp = requests.get(url, params=params, timeout=timeout)
+    except requests.RequestException as e:
+        raise LiveDataError(f"Request to Google Sheets failed: {e}") from e
+
+    if resp.status_code != 200:
+        raise LiveDataError(
+            f"Google Sheets returned HTTP {resp.status_code} for sheet {sheet_id}. "
+            "If this is a permissions error, share the sheet as "
+            "'Anyone with the link can view' (Share → General access)."
+        )
+    content_type = resp.headers.get("Content-Type", "")
+    text = resp.text
+    if "text/csv" not in content_type or text.lstrip().startswith("<"):
+        raise LiveDataError(
+            f"Sheet {sheet_id} did not return CSV (got Content-Type: {content_type!r}). "
+            "This usually means the sheet isn't shared publicly — set sharing to "
+            "'Anyone with the link can view' (Share → General access) and try again."
+        )
+    return text
