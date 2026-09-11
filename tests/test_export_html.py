@@ -111,6 +111,29 @@ def test_scenario_projector_respects_no_field_names(conn):
     assert '"name": "Always Hot"' not in out
 
 
+def test_scenario_projector_embeds_real_declared_bets(conn):
+    importer.import_schedule(conn, 2026, 1, "Atlanta, Pittsburgh\n")
+    importer.import_assignments(conn, 2026, 1, "SPM, Pittsburgh\nAlways Hot, Atlanta\n")
+    importer.record_my_pick(conn, 2026, 1, "SPM", "Atlanta", "Pittsburgh", "home", "WIN", 40)
+    importer.record_game_result(
+        conn, 2026, 1, "Atlanta", "Pittsburgh", favorite="away", margin=12, outcome=None
+    )
+    assignment_id = conn.execute(
+        "SELECT a.id FROM assignment a JOIN entry e ON e.id=a.entry_id WHERE e.display_name='Always Hot'"
+    ).fetchone()[0]
+    conn.execute(
+        "INSERT INTO wager_observation (assignment_id, declared_pick, declared_bet) VALUES (?, 'LOSS', 75)",
+        (assignment_id,),
+    )
+    conn.commit()
+    cfg = PoolConfig.load(conn)
+    out = render_report_html(conn, cfg, season=2026, week=1)
+    assert '"pick": "WIN"' in out and '"bet": 40' in out
+    assert '"pick": "LOSS"' in out and '"bet": 75' in out
+    assert "All favorites win" in out
+    assert "Random outcomes" in out
+
+
 def test_scenario_projector_tab_shows_placeholder_without_week(conn):
     # The tab itself is always present (it's a nav button, not conditional
     # content) — without a season/week there's just nothing to project yet.

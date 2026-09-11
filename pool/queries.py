@@ -243,6 +243,11 @@ class ScenarioEntry:
     home_team: str
     assigned_side: str
     points_entering_week: float
+    # The entry's actual declared pick/bet for this week, when known (via
+    # record_my_pick or import_week_field_picks) — None means not yet
+    # declared, so the projector should fall back to an assumption instead.
+    declared_pick: Optional[str] = None
+    declared_bet: Optional[float] = None
 
 
 @dataclass
@@ -288,10 +293,12 @@ def get_scenario_projection_data(
     assignments = conn.execute(
         """
         SELECT e.display_name, e.is_mine, e.id AS entry_id, a.assigned_side,
-               g.away_team, g.home_team, g.favorite, g.spread_margin, g.outcome
+               g.away_team, g.home_team, g.favorite, g.spread_margin, g.outcome,
+               wo.declared_pick, wo.declared_bet
         FROM assignment a
         JOIN entry e ON e.id = a.entry_id
         JOIN game g ON g.id = a.game_id
+        LEFT JOIN wager_observation wo ON wo.assignment_id = a.id
         WHERE g.week_id = ?
         ORDER BY e.is_mine DESC, e.display_name
         """,
@@ -325,6 +332,7 @@ def get_scenario_projection_data(
                 name=r["display_name"], is_mine=bool(r["is_mine"]),
                 away_team=r["away_team"], home_team=r["home_team"],
                 assigned_side=r["assigned_side"], points_entering_week=points,
+                declared_pick=r["declared_pick"], declared_bet=r["declared_bet"],
             )
         )
 

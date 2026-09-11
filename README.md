@@ -139,11 +139,16 @@ whenever you want the published page to reflect the current state.
 - **My Entries** — game log + this week's recommended pick per entry.
 - **Field** — the full field's standings/reconstruction (or aggregate
   counts only, see `--no-field-names` below).
-- **Scenario Projector** — pick a hypothetical outcome per game and a
-  generalized field bet %, and the whole real field's projected standings
-  recompute instantly, entirely in the browser (no server round-trip).
-  Your 3 entries get individual pick/wager controls; the field uses one
-  shared bet-fraction slider assumed to bet WIN on their assigned team.
+- **Scenario Projector** — pick a hypothetical outcome per game (or use a
+  preset: all favorites win, all underdogs win, random, reset), and the
+  whole real field's projected standings recompute instantly, entirely in
+  the browser (no server round-trip). Any entry with a real declared
+  pick/bet on file (via `import-week-picks` or `record-my-pick`) uses it
+  directly — marked "bet placed" — instead of a guess; only entries with
+  nothing declared yet fall back to the generalized field bet-fraction
+  slider (assumed WIN on their assigned team). Your 3 entries' controls
+  default to the real bet but stay editable, for exploring "what if I'd
+  bet differently."
 - **Simulation** — the Monte Carlo P(1st)/top3/top10/expected-payout
   comparison across four bet-sizing policies, for all 3 entries together.
 

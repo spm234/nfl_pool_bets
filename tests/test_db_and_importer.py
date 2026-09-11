@@ -355,6 +355,22 @@ def test_scenario_projection_data_week_1_defaults_to_start_points(conn):
     assert ("Dallas", "NY Giants") in game_keys
 
 
+def test_scenario_projection_data_includes_real_declared_picks(conn):
+    # The Scenario Projector should reflect real bets, not just guess WIN@x%
+    # for every field entry, once picks/bets are actually on file.
+    importer.import_week_field_picks(conn, 2026, 1, _SAMPLE_FIELD_PICKS_TSV)
+    cfg = PoolConfig.load(conn)
+    data = get_scenario_projection_data(conn, 2026, 1, cfg)
+
+    spm = next(e for e in data.entries if e.name == "SPM")
+    assert spm.declared_pick == "LOSS"
+    assert spm.declared_bet == 120
+
+    not_yet = next(e for e in data.entries if e.name == "Bigbert52")
+    assert not_yet.declared_pick is None
+    assert not_yet.declared_bet is None
+
+
 def test_scenario_projection_data_uses_prior_week_points(conn):
     importer.import_week_csv(conn, 2026, 1, _SAMPLE_WEEK_CSV)
     # Week 2: same entries, different (already-known) points entering week 2.
