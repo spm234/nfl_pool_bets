@@ -32,10 +32,16 @@ recommendations are three distinct layers, not flattened together:
 1. **Raw observations** — `game` (posted results/spread), `entry_week_points`
    (posted standings, same shape as the manual paste box: "Name, Points" per
    week), `market_snapshot` (fetched spread estimates), `wager_observation`
-   (my own declared picks/bets — I know these directly, they aren't inferred).
+   (declared picks/bets — mine always, and the whole field too whenever the
+   pool's export includes everyone's declaration, via `import-week-picks`;
+   these are known directly, not inferred).
 2. **Inferred data** — `wager_inference`: reconstructed (pick, bet)
    hypotheses for field entries, computed from point deltas via
-   `reconstruct_candidates`, with a confidence ranking.
+   `reconstruct_candidates`, with a confidence ranking. Only used as a
+   fallback: `compute_field_reconstruction` checks `wager_observation` first
+   for each entry and skips inference entirely wherever a real declaration
+   is on file — no need to guess what's already known. The Field tab marks
+   which is which (bold = declared, plain = reconstructed guess).
 3. **Recommendations** — computed on demand by the simulation layer
    (`pool/recommend.py`, `pool/simulation.py`), never persisted.
 
@@ -69,6 +75,14 @@ python -m pool.cli config-set --min-bet 20 --entry-fee 30 \
 # (confirmed: that's how this pool actually works — WIN/LOSS/TIE is your
 # bet on that team, there's no separate "pick the home team instead").
 python -m pool.cli import-week --season 2026 --week 1 --file week1.csv
+
+# If the pool's export includes everyone's DECLARED pick and bet (header:
+# Rank,Team Name,Total Pts,Team 1,Win/Lose,Team 2,Bet Amount), import that
+# instead -- it's a direct observation for the whole field, not a guess
+# reconstructed from a point delta. Covers "mine" too (recording what was
+# actually bet, which can differ from what was recommended). An entry with
+# no pick/bet yet still gets its assignment/standings recorded.
+python -m pool.cli import-week-picks --season 2026 --week 1 --file week1_picks.tsv
 
 # Or piece by piece, if your data doesn't come as one file:
 python -m pool.cli import-schedule --season 2026 --week 1 --file schedule.txt

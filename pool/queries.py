@@ -108,6 +108,11 @@ class FieldReconRow:
     current_points: Optional[float]
     delta: Optional[float]
     candidates: List[Candidate]
+    # Set when this entry's actual pick/bet was directly declared (e.g. via
+    # import_week_field_picks) rather than guessed from a point delta —
+    # in that case `candidates` is a single, definitive entry, not a
+    # ranked list of hypotheses.
+    observed: bool = False
 
 
 def compute_field_reconstruction(
@@ -133,10 +138,12 @@ def compute_field_reconstruction(
     assignments = conn.execute(
         """
         SELECT a.id AS assignment_id, a.entry_id, e.display_name, a.assigned_side,
-               g.away_team, g.home_team, g.favorite, g.spread_margin, g.outcome
+               g.away_team, g.home_team, g.favorite, g.spread_margin, g.outcome,
+               wo.declared_pick, wo.declared_bet
         FROM assignment a
         JOIN entry e ON e.id = a.entry_id
         JOIN game g ON g.id = a.game_id
+        LEFT JOIN wager_observation wo ON wo.assignment_id = a.id
         WHERE g.week_id = ? AND e.is_mine = 0
         ORDER BY e.display_name
         """,
@@ -166,35 +173,50 @@ def compute_field_reconstruction(
         spread = spread_for_team(game, side)
         outcome = outcome_for_team(game, side)
 
-        candidates = reconstruct_candidates(
-            prev_points,
-            cur_points,
-            spread,
-            outcome,
-            config.min_bet,
-            upset_threshold=config.upset_spread_threshold,
-            upset_multiplier=config.upset_multiplier,
-            tie_multiplier=config.tie_multiplier,
-            counts_favorite_loss=config.upset_counts_favorite_loss,
-        )
-
-        if candidates:
-            now = datetime.now(timezone.utc).isoformat()
-            for rank, c in enumerate(candidates):
-                conn.execute(
-                    """
-                    INSERT INTO wager_inference
-                        (assignment_id, inferred_pick, inferred_bet, confidence_rank, label, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(assignment_id, inferred_pick) DO UPDATE SET
-                        inferred_bet = excluded.inferred_bet,
-                        confidence_rank = excluded.confidence_rank,
-                        label = excluded.label,
-                        created_at = excluded.created_at
-                    """,
-                    (r["assignment_id"], c.pick, c.bet, rank, c.label, now),
+        # A real declared pick/bet (e.g. from import_week_field_picks) beats
+        # any guess reconstructed from a point delta — no need to infer what
+        # was directly observed.
+        if r["declared_pick"] is not None and r["declared_bet"] is not None:
+            candidates = [
+                Candidate(
+                    pick=r["declared_pick"],
+                    bet=int(r["declared_bet"]),
+                    label="Confirmed (declared)",
+                    round_bonus=0,
                 )
-            conn.commit()
+            ]
+            observed = True
+        else:
+            candidates = reconstruct_candidates(
+                prev_points,
+                cur_points,
+                spread,
+                outcome,
+                config.min_bet,
+                upset_threshold=config.upset_spread_threshold,
+                upset_multiplier=config.upset_multiplier,
+                tie_multiplier=config.tie_multiplier,
+                counts_favorite_loss=config.upset_counts_favorite_loss,
+            )
+            observed = False
+
+            if candidates:
+                now = datetime.now(timezone.utc).isoformat()
+                for rank, c in enumerate(candidates):
+                    conn.execute(
+                        """
+                        INSERT INTO wager_inference
+                            (assignment_id, inferred_pick, inferred_bet, confidence_rank, label, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        ON CONFLICT(assignment_id, inferred_pick) DO UPDATE SET
+                            inferred_bet = excluded.inferred_bet,
+                            confidence_rank = excluded.confidence_rank,
+                            label = excluded.label,
+                            created_at = excluded.created_at
+                        """,
+                        (r["assignment_id"], c.pick, c.bet, rank, c.label, now),
+                    )
+                conn.commit()
 
         out.append(
             FieldReconRow(
@@ -207,6 +229,7 @@ def compute_field_reconstruction(
                 current_points=cur_points,
                 delta=(cur_points - prev_points) if (cur_points is not None and prev_points is not None) else None,
                 candidates=candidates,
+                observed=observed,
             )
         )
     return out

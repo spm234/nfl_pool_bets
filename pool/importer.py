@@ -232,6 +232,114 @@ def record_game_result(
     return game_id
 
 
+_FIELD_PICK_MAP = {"WIN": "WIN", "LOSE": "LOSS", "LOSS": "LOSS", "TIE": "TIE"}
+
+
+@dataclass
+class FieldPickRow:
+    name: str
+    points: Optional[float]
+    away_team: str
+    home_team: str
+    pick: Optional[str]  # None = not yet declared
+    bet: Optional[float]
+
+
+def _detect_delimiter(text: str) -> str:
+    first_line = text.strip("\n").splitlines()[0] if text.strip("\n") else ""
+    return "\t" if "\t" in first_line else ","
+
+
+def parse_week_field_picks(csv_text: str) -> List[FieldPickRow]:
+    """Parses the pool's "picks made" export: one row per entry with
+    Rank, Team Name, Total Pts, Team 1 (away), Win/Lose, Team 2 (home),
+    Bet Amount. Unlike import_week_csv's standings-only shape, this format
+    carries the actual DECLARED pick and bet for every entry in the field —
+    not just mine — so it's raw observation, not reconstruction/inference.
+
+    Tab- or comma-delimited (whichever the paste uses); a header row is
+    detected and skipped automatically by checking whether the 3rd column
+    parses as a number. A blank pick/bet (not yet declared as of the paste)
+    is kept as None rather than guessed at.
+    """
+    delimiter = _detect_delimiter(csv_text)
+    reader = csv.reader(io.StringIO(csv_text.strip("\n")), delimiter=delimiter)
+    rows = [row for row in reader if any(c.strip() for c in row)]
+    if not rows:
+        return []
+    if len(rows[0]) >= 3:
+        try:
+            float(rows[0][2])
+        except ValueError:
+            rows = rows[1:]  # header row
+
+    out = []
+    for row in rows:
+        if len(row) < 7:
+            continue
+        _rank, name, total_pts, team1, pick_raw, team2, bet_raw = (c.strip() for c in row[:7])
+        if not name:
+            continue
+        pick = _FIELD_PICK_MAP.get(pick_raw.upper()) if pick_raw else None
+        bet: Optional[float]
+        try:
+            bet = float(bet_raw) if bet_raw else None
+        except ValueError:
+            bet = None
+        try:
+            points = float(total_pts) if total_pts else None
+        except ValueError:
+            points = None
+        out.append(
+            FieldPickRow(
+                name=name, points=points, away_team=team1, home_team=team2, pick=pick, bet=bet
+            )
+        )
+    return out
+
+
+def import_week_field_picks(
+    conn: sqlite3.Connection, season_year: int, week_number: int, csv_text: str
+) -> Tuple[int, int]:
+    """Records the REAL declared pick and bet for every entry in the field
+    (mine included) for a week — a direct observation, not something
+    reconstructed from a point delta. Every entry is assigned the away team
+    (confirmed convention, see import_week_csv). An entry with no pick/bet
+    yet declared still gets its assignment/standings recorded, just no
+    wager_observation row. Returns (entries_seen, wagers_recorded).
+    """
+    week_id = db.get_or_create_week(conn, season_year, week_number)
+    rows = parse_week_field_picks(csv_text)
+    wagers = 0
+    for r in rows:
+        game_id = db.get_or_create_game(conn, week_id, r.away_team, r.home_team)
+        entry_id = db.get_or_create_entry(conn, owner_name=r.name, display_name=r.name)
+        assignment_id = db.get_or_create_assignment(conn, entry_id, game_id, "away")
+        if r.points is not None:
+            conn.execute(
+                """
+                INSERT INTO entry_week_points (entry_id, week_id, points)
+                VALUES (?, ?, ?)
+                ON CONFLICT(entry_id, week_id) DO UPDATE SET points = excluded.points
+                """,
+                (entry_id, week_id, r.points),
+            )
+        if r.pick is not None and r.bet is not None:
+            conn.execute(
+                """
+                INSERT INTO wager_observation (assignment_id, declared_pick, declared_bet, is_late_default)
+                VALUES (?, ?, ?, 0)
+                ON CONFLICT(assignment_id) DO UPDATE SET
+                    declared_pick = excluded.declared_pick,
+                    declared_bet = excluded.declared_bet
+                """,
+                (assignment_id, r.pick, r.bet),
+            )
+            wagers += 1
+    conn.commit()
+    return len(rows), wagers
+
+
 def record_my_pick(
     conn: sqlite3.Connection,
     season_year: int,

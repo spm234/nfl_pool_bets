@@ -127,6 +127,43 @@ def test_field_reconstruction_end_to_end(conn):
     assert stored["n"] >= 1
 
 
+def test_field_reconstruction_prefers_real_declared_pick_over_inference(conn):
+    # A field entry could plausibly have bet WIN 15 (round_bonus) or other
+    # candidates consistent with the same +30 delta -- but here the actual
+    # pick/bet is directly known (e.g. from import_week_field_picks), so
+    # reconstruction must report that instead of guessing among candidates.
+    importer.import_schedule(conn, 2026, 1, "Atlanta, Pittsburgh\n")
+    importer.import_assignments(conn, 2026, 1, "Always Hot, Pittsburgh\n")
+    importer.record_game_result(
+        conn, 2026, 1, "Atlanta", "Pittsburgh", favorite="away", margin=3, outcome="home"
+    )
+    importer.import_standings(conn, 2026, 1, "Always Hot, 180\n")
+    assignment_id = conn.execute(
+        """
+        SELECT a.id FROM assignment a JOIN entry e ON e.id = a.entry_id
+        WHERE e.display_name = 'Always Hot'
+        """
+    ).fetchone()["id"]
+    conn.execute(
+        "INSERT INTO wager_observation (assignment_id, declared_pick, declared_bet) VALUES (?, 'WIN', 30)",
+        (assignment_id,),
+    )
+    conn.commit()
+
+    cfg = PoolConfig.load(conn)
+    rows = compute_field_reconstruction(conn, 2026, 1, cfg)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.observed is True
+    assert len(row.candidates) == 1
+    assert row.candidates[0].pick == "WIN"
+    assert row.candidates[0].bet == 30
+
+    # no guessing needed -- nothing written to wager_inference for this entry
+    stored = conn.execute("SELECT COUNT(*) AS n FROM wager_inference").fetchone()
+    assert stored["n"] == 0
+
+
 def test_record_game_result_partial_update_preserves_other_fields(conn):
     importer.record_game_result(
         conn, 2026, 1, "Atlanta", "Pittsburgh", favorite="away", margin=12, outcome=None
@@ -213,6 +250,89 @@ def test_import_week_csv_idempotent_on_rerun(conn):
     importer.import_week_csv(conn, 2026, 1, _SAMPLE_WEEK_CSV)  # rerun, e.g. re-uploaded file
     count = conn.execute("SELECT COUNT(*) AS n FROM entry WHERE display_name = 'Always Hot'").fetchone()
     assert count["n"] == 1
+
+
+_SAMPLE_FIELD_PICKS_TSV = (
+    "Rank\tTeam Name\tTotal Pts\tTeam 1\tWin / Lose\tTeam 2\tBet Amount\n"
+    "1\t01 Sportsbet\t150\tCleveland\tLOSE\tJacksonville\t150\n"
+    "2\tSPM\t150\tAtlanta\tLOSE\tPittsburgh\t120\n"
+    "3\tSPM 2\t150\tBuffalo\tWIN\tHouston\t50\n"
+    "4\tBigbert52\t150\tArizona\t\tLA Chargers\t0\n"
+)
+
+
+def test_import_week_field_picks_records_real_wagers_for_whole_field(conn):
+    entries, wagers = importer.import_week_field_picks(conn, 2026, 1, _SAMPLE_FIELD_PICKS_TSV)
+    assert entries == 4
+    assert wagers == 3  # Bigbert52 has no pick declared yet -> not counted
+
+    row = conn.execute(
+        """
+        SELECT wo.declared_pick, wo.declared_bet FROM wager_observation wo
+        JOIN assignment a ON a.id = wo.assignment_id
+        JOIN entry e ON e.id = a.entry_id
+        WHERE e.display_name = 'SPM'
+        """
+    ).fetchone()
+    assert row["declared_pick"] == "LOSS"  # 'LOSE' in the export maps to scoring's 'LOSS'
+    assert row["declared_bet"] == 120
+
+    # every entry still assigned the away team, even field entries
+    sides = {r["assigned_side"] for r in conn.execute("SELECT DISTINCT assigned_side FROM assignment")}
+    assert sides == {"away"}
+
+
+def test_import_week_field_picks_no_pick_yet_still_records_assignment_and_points(conn):
+    importer.import_week_field_picks(conn, 2026, 1, _SAMPLE_FIELD_PICKS_TSV)
+    bigbert = conn.execute(
+        "SELECT id FROM entry WHERE display_name = 'Bigbert52'"
+    ).fetchone()
+    assert bigbert is not None
+    wager = conn.execute(
+        """
+        SELECT wo.id FROM wager_observation wo
+        JOIN assignment a ON a.id = wo.assignment_id
+        WHERE a.entry_id = ?
+        """,
+        (bigbert["id"],),
+    ).fetchone()
+    assert wager is None  # no pick/bet declared yet -> no observation row
+
+
+def test_import_week_field_picks_attaches_to_preseeded_my_entry(conn):
+    importer.import_week_field_picks(conn, 2026, 1, _SAMPLE_FIELD_PICKS_TSV)
+    spm = conn.execute("SELECT id, is_mine FROM entry WHERE display_name = 'SPM'").fetchone()
+    assert spm["is_mine"] == 1
+    count = conn.execute("SELECT COUNT(*) AS n FROM entry WHERE display_name = 'SPM'").fetchone()
+    assert count["n"] == 1
+
+
+def test_import_week_field_picks_rerun_updates_rather_than_duplicates(conn):
+    importer.import_week_field_picks(conn, 2026, 1, _SAMPLE_FIELD_PICKS_TSV)
+    updated_tsv = _SAMPLE_FIELD_PICKS_TSV.replace("Atlanta\tLOSE\tPittsburgh\t120", "Atlanta\tLOSE\tPittsburgh\t130")
+    importer.import_week_field_picks(conn, 2026, 1, updated_tsv)
+    rows = conn.execute(
+        """
+        SELECT wo.declared_bet FROM wager_observation wo
+        JOIN assignment a ON a.id = wo.assignment_id
+        JOIN entry e ON e.id = a.entry_id
+        WHERE e.display_name = 'SPM'
+        """
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["declared_bet"] == 130
+
+
+def test_parse_week_field_picks_handles_comma_delimited():
+    csv_text = (
+        "Rank,Team Name,Total Pts,Team 1,Win / Lose,Team 2,Bet Amount\n"
+        "1,Always Hot,150,Atlanta,LOSE,Pittsburgh,50\n"
+    )
+    rows = importer.parse_week_field_picks(csv_text)
+    assert len(rows) == 1
+    assert rows[0].name == "Always Hot"
+    assert rows[0].pick == "LOSS"
+    assert rows[0].bet == 50
 
 
 def test_scenario_projection_data_week_1_defaults_to_start_points(conn):

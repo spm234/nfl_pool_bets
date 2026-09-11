@@ -99,6 +99,17 @@ def cmd_import_week_csv(args):
     conn.close()
 
 
+def cmd_import_week_picks(args):
+    conn = db.connect(args.db)
+    text = _read_text(args.file)
+    entries, wagers = importer.import_week_field_picks(conn, args.season, args.week, text)
+    print(
+        f"Imported {entries} entries for week {args.week}; recorded {wagers} declared "
+        f"picks/bets as real observations (not inferred)."
+    )
+    conn.close()
+
+
 def cmd_import_week_sheet(args):
     conn = db.connect(args.db)
     try:
@@ -526,6 +537,17 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--week", type=int, required=True)
     sp.add_argument("--file", help="Read from this file instead of stdin")
     sp.set_defaults(func=cmd_import_week_csv)
+
+    sp = sub.add_parser(
+        "import-week-picks",
+        help="Import REAL declared picks/bets for the whole field (header: Rank,Team "
+        "Name,Total Pts,Team 1,Win/Lose,Team 2,Bet Amount) — a direct observation, "
+        "not something reconstructed from a point delta",
+    )
+    sp.add_argument("--season", type=int, required=True)
+    sp.add_argument("--week", type=int, required=True)
+    sp.add_argument("--file", help="Read from this file instead of stdin")
+    sp.set_defaults(func=cmd_import_week_picks)
 
     sp = sub.add_parser(
         "import-week-sheet",

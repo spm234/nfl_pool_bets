@@ -135,6 +135,7 @@ tr:last-child td{border-bottom:none;}
 .stat-tile .n{font-family:'Big Shoulders Display',sans-serif; font-weight:800; font-size:28px; color:var(--amber);}
 .stat-tile .l{font-size:12px; color:var(--chalk-dim); margin-top:2px;}
 .empty-note{font-size:13px; color:var(--chalk-dim); font-style:italic;}
+.confirmed-pick{font-weight:700;}
 .scenario-row{
   display:flex; flex-wrap:wrap; align-items:center; gap:10px;
   padding:9px 0; border-bottom:1px solid rgba(255,255,255,.05);
@@ -662,7 +663,12 @@ def _field_summary_section(
         trs = []
         for r in rows:
             cands_raw = ", ".join(f"{c.pick} {c.bet}" for c in r.candidates)
-            cands = _esc(cands_raw) if cands_raw else "&mdash;"
+            if not cands_raw:
+                cands = "&mdash;"
+            elif r.observed:
+                cands = f"<span class='confirmed-pick'>{_esc(cands_raw)}</span>"
+            else:
+                cands = _esc(cands_raw)
             trs.append(
                 f"<tr><td>{_esc(r.entry_name)}</td><td class='mono'>{_esc(r.away_team)}@{_esc(r.home_team)}</td>"
                 f"<td class='mono'>{r.prev_points if r.prev_points is not None else '&mdash;'}</td>"
@@ -671,8 +677,10 @@ def _field_summary_section(
             )
         return (
             '<div class="card">'
+            '<p class="empty-note">Bold = declared pick/bet, directly observed. Plain = a guess '
+            "reconstructed from the week's point change (no declaration on file).</p>"
             '<div class="table-scroll"><table><thead><tr><th>Entry</th><th>Game</th>'
-            f"<th>Prev</th><th>Cur</th><th>&Delta;</th><th>Likely bet</th></tr></thead>"
+            f"<th>Prev</th><th>Cur</th><th>&Delta;</th><th>Pick / bet</th></tr></thead>"
             f"<tbody>{''.join(trs)}</tbody></table></div></div>"
         )
 
