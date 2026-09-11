@@ -320,6 +320,36 @@ you're chasing 1st, and worth less if you're just trying to survive). The
 reasoning text shown alongside each recommendation states both picks' EV
 per point so you can see the comparison, not just the conclusion.
 
+## Bet sizing: Kelly criterion, not a flat percentage
+
+`recommend.recommend_bet_size` sizes the stake from the *actual* edge of
+the chosen pick — its model win probability and payout multiplier
+(`recommend.kelly_fraction`) — instead of a flat percentage keyed only to
+whether the pick happens to be a qualifying 10x upset. Previously two picks
+with very different confidence (say a 1.5-point favorite vs. a 5.5-point
+favorite, neither a qualifying upset) got the exact same stake, because
+sizing only looked at the upset/non-upset switch, not the underlying win
+probability. Now the bigger, more confident edge gets a bigger stake.
+
+The `--aggression` setting (0-100) scales how much of *full* Kelly is
+actually bet: 0 → 10% of Kelly, 100 → 75% of Kelly. Full Kelly is never
+used outright — it's theoretically optimal for long-run compounding growth
+of a repeatedly-reinvested bankroll, not for a short, finite, ranked
+tournament with a top-10 payout structure.
+
+This same real win probability and multiplier also feed the Monte Carlo
+simulation for the *immediate* week only (`simulation.EntryPolicy`'s
+`first_week_*` override) — every other, not-yet-known future week still
+falls back to the simulator's generic calibrated assumptions, since future
+matchups aren't knowable yet. So P(1st)/P(top10)/expected payout in the
+weekly output now actually improve for a more confident pick, not just the
+stake size:
+
+```
+SPM   — spread 5.5 (71% win prob):  bet 30, expected payout $54.85
+SPM 2 — spread -1.5 (56% win prob): bet 20, expected payout $28.41
+```
+
 ## What's deliberately thin
 
 - **Competitor profiles** (`pool/profiles.py`): built from the top-confidence

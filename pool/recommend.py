@@ -16,6 +16,7 @@ class PickChoice:
     pick: Pick  # 'WIN' or 'LOSS' — never defaults to WIN without comparing
     win_probability: float  # model-estimated probability THIS pick is correct
     is_upset: bool
+    multiplier: float  # 1 for a normal pick, upset_multiplier for a qualifying upset
     ev_per_point: float
     other_pick_ev_per_point: float  # EV of the pick not chosen, for transparency
 
@@ -59,26 +60,52 @@ def choose_pick(
     loss_ev = ev("LOSS", 1 - p_team_win)
 
     if win_ev >= loss_ev:
+        is_upset = is_upset_pick(spread, "WIN", upset_threshold=upset_threshold, counts_favorite_loss=counts_favorite_loss)
         return PickChoice(
-            pick="WIN", win_probability=p_team_win,
-            is_upset=is_upset_pick(spread, "WIN", upset_threshold=upset_threshold, counts_favorite_loss=counts_favorite_loss),
+            pick="WIN", win_probability=p_team_win, is_upset=is_upset,
+            multiplier=upset_multiplier if is_upset else 1.0,
             ev_per_point=win_ev, other_pick_ev_per_point=loss_ev,
         )
+    is_upset = is_upset_pick(spread, "LOSS", upset_threshold=upset_threshold, counts_favorite_loss=counts_favorite_loss)
     return PickChoice(
-        pick="LOSS", win_probability=1 - p_team_win,
-        is_upset=is_upset_pick(spread, "LOSS", upset_threshold=upset_threshold, counts_favorite_loss=counts_favorite_loss),
+        pick="LOSS", win_probability=1 - p_team_win, is_upset=is_upset,
+        multiplier=upset_multiplier if is_upset else 1.0,
         ev_per_point=loss_ev, other_pick_ev_per_point=win_ev,
     )
 
 
-def recommend_bet_sizes(current_points: float, min_bet: float, aggression: float = 50) -> dict:
-    """aggression: 0 (conservative) .. 100 (aggressive)."""
-    frac_normal = 0.15 + (0.6 - 0.15) * (aggression / 100)
-    frac_upset = 0.3 + (0.9 - 0.3) * (aggression / 100)
+def kelly_fraction(win_probability: float, multiplier: float) -> float:
+    """Full Kelly fraction for a bet shaped like this pool's actual payout
+    (see scoring.score_bet): win and the stake grows by bet*multiplier,
+    lose and the stake is gone — never a fraction returned regardless of
+    outcome. Clamped to [0, 1]; a probability too low to justify betting
+    at all recommends betting nothing, never a negative (short) stake.
+    """
+    if multiplier <= 0:
+        return 0.0
+    edge = win_probability * multiplier - (1 - win_probability)
+    return max(0.0, min(1.0, edge / multiplier))
+
+
+def recommend_bet_size(
+    current_points: float, min_bet: float, win_probability: float, multiplier: float, aggression: float = 50
+) -> dict:
+    """Stake scales continuously with the actual edge (win probability and
+    payout multiplier), not just a flat percentage — a 71%-likely pick and
+    a 55%-likely pick should not get the same stake, and previously did.
+
+    aggression (0..100) scales how much of full Kelly to actually bet:
+    0 -> 10% of Kelly (very conservative), 100 -> 75% of Kelly. Never full
+    Kelly — that's theoretically optimal for long-run compounding growth
+    of a repeatedly-reinvested bankroll, not appropriate for a short,
+    finite, ranked tournament with a top-10 payout structure.
+    """
+    full_kelly = kelly_fraction(win_probability, multiplier)
+    kelly_scale = 0.10 + (0.75 - 0.10) * (aggression / 100)
+    fraction = full_kelly * kelly_scale
     floor = min(min_bet, current_points)
-    bet_normal = max(floor, min(current_points, round(current_points * frac_normal / 10) * 10))
-    bet_upset = max(floor, min(current_points, round(current_points * frac_upset / 10) * 10))
-    return {"normal": bet_normal, "upset": bet_upset, "frac_normal": frac_normal, "frac_upset": frac_upset}
+    bet = max(floor, min(current_points, round(current_points * fraction / 10) * 10))
+    return {"bet": bet, "fraction": fraction, "full_kelly": full_kelly}
 
 
 @dataclass
@@ -109,7 +136,12 @@ def build_weekly_recommendations(
     team is an underdog by N, negative = favored by N, 0 = pick'em.
 
     The pick (WIN or LOSS) is chosen per entry by choose_pick — it is never
-    assumed to be WIN.
+    assumed to be WIN. The stake is Kelly-derived from that same pick's
+    actual win probability and payout multiplier, and the simulated
+    P(1st)/P(top10)/expected payout below uses that real probability for
+    the immediate week too (via EntryPolicy's first_week_* override) —
+    only weeks beyond this one fall back to the simulator's generic
+    calibrated assumptions, since future matchups aren't known yet.
     """
     policies = []
     sizes = []
@@ -120,43 +152,43 @@ def build_weekly_recommendations(
             upset_multiplier=upset_multiplier, counts_favorite_loss=counts_favorite_loss,
         )
         choices.append(choice)
-        s = recommend_bet_sizes(e["current_points"], assumptions.min_bet, aggression)
-        sizes.append(s)
-        bet = s["upset"] if choice.is_upset else s["normal"]
-        frac = bet / e["current_points"] if e["current_points"] else 0
-        policies.append(EntryPolicy(bet_fraction=frac, take_upset=True))
+        size = recommend_bet_size(
+            e["current_points"], assumptions.min_bet, choice.win_probability, choice.multiplier, aggression
+        )
+        sizes.append(size)
+        frac = size["bet"] / e["current_points"] if e["current_points"] else 0
+        policies.append(
+            EntryPolicy(
+                bet_fraction=frac, take_upset=True,
+                first_week_win_prob=choice.win_probability,
+                first_week_mult=choice.multiplier,
+                first_week_bet_fraction=frac,
+            )
+        )
 
     starts = [e["current_points"] for e in entries]
     sim_results = run_simulation(assumptions, policies, starts, payouts, entry_fee, seed=seed)
 
     out = []
-    for e, s, choice, res in zip(entries, sizes, choices, sim_results):
+    for e, size, choice, res in zip(entries, sizes, choices, sim_results):
         other_pick = "LOSS" if choice.pick == "WIN" else "WIN"
-        ev_note = (
-            f"Model win probability {choice.win_probability:.0%}; expected value "
-            f"{choice.ev_per_point:+.2f}/pt on {choice.pick} vs {choice.other_pick_ev_per_point:+.2f}/pt "
-            f"on {other_pick} — compares linear point EV only, not full tournament payout strategy."
+        reasoning = (
+            f"Recommended pick: {choice.pick}"
+            + (" — qualifying 10x upset." if choice.is_upset else ".")
+            + f" Model win probability {choice.win_probability:.0%}; stake sized at "
+            f"{size['fraction']*100:.0f}% of stack ({size['full_kelly']*100:.0f}% would be full "
+            f"Kelly at this edge, scaled down by the aggression setting). "
+            f"{choice.pick} EV {choice.ev_per_point:+.2f}/pt vs {other_pick} "
+            f"{choice.other_pick_ev_per_point:+.2f}/pt — compares linear point EV only, not full "
+            f"tournament payout strategy."
         )
-        if choice.is_upset:
-            bet = s["upset"]
-            reasoning = (
-                f"Recommended pick: {choice.pick} — qualifies as a 10x-upset opportunity, "
-                f"sized more aggressively ({s['frac_upset']*100:.0f}% of stack) to reflect "
-                f"the payout skew. {ev_note}"
-            )
-        else:
-            bet = s["normal"]
-            reasoning = (
-                f"Recommended pick: {choice.pick} — normal week, bet sized at "
-                f"{s['frac_normal']*100:.0f}% of current stack. {ev_note}"
-            )
         out.append(
             EntryRecommendation(
                 entry_name=e["name"],
                 current_points=e["current_points"],
                 recommended_pick=choice.pick,
                 is_upset_opportunity=choice.is_upset,
-                recommended_bet=bet,
+                recommended_bet=size["bet"],
                 recommended_pick_reasoning=reasoning,
                 sim_result=res,
             )
