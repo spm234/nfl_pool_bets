@@ -29,6 +29,12 @@ class PoolConfig:
     spread_source_name: str = "manually confirmed source (set spread_source_name)"
     upset_counts_favorite_loss: bool = True
     default_field_size: int = 107
+    # Monte Carlo defaults (SimAssumptions). Calibratable from real season
+    # data via importer.calibrate_from_lookahead_sheets rather than left as
+    # arbitrary guesses — see pool/calibrate_cli or `calibrate-simulation`.
+    sim_p_win: float = 0.50
+    sim_p_upset_freq: float = 0.20
+    sim_p_upset_win: float = 0.22
 
     @classmethod
     def load(cls, conn: sqlite3.Connection) -> "PoolConfig":
@@ -49,6 +55,9 @@ class PoolConfig:
             spread_source_name=row["spread_source_name"],
             upset_counts_favorite_loss=bool(row["upset_counts_favorite_loss"]),
             default_field_size=row["default_field_size"],
+            sim_p_win=row["sim_p_win"],
+            sim_p_upset_freq=row["sim_p_upset_freq"],
+            sim_p_upset_win=row["sim_p_upset_win"],
         )
 
     def save(self, conn: sqlite3.Connection) -> None:
@@ -58,8 +67,9 @@ class PoolConfig:
                 id, start_points, min_bet, entry_fee, payouts_json,
                 upset_spread_threshold, upset_multiplier, tie_multiplier,
                 late_pick_default_bet, late_pick_default_side, late_pick_default_pick,
-                spread_source_name, upset_counts_favorite_loss, default_field_size
-            ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                spread_source_name, upset_counts_favorite_loss, default_field_size,
+                sim_p_win, sim_p_upset_freq, sim_p_upset_win
+            ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 start_points=excluded.start_points,
                 min_bet=excluded.min_bet,
@@ -73,7 +83,10 @@ class PoolConfig:
                 late_pick_default_pick=excluded.late_pick_default_pick,
                 spread_source_name=excluded.spread_source_name,
                 upset_counts_favorite_loss=excluded.upset_counts_favorite_loss,
-                default_field_size=excluded.default_field_size
+                default_field_size=excluded.default_field_size,
+                sim_p_win=excluded.sim_p_win,
+                sim_p_upset_freq=excluded.sim_p_upset_freq,
+                sim_p_upset_win=excluded.sim_p_upset_win
             """,
             (
                 self.start_points,
@@ -89,6 +102,9 @@ class PoolConfig:
                 self.spread_source_name,
                 int(self.upset_counts_favorite_loss),
                 self.default_field_size,
+                self.sim_p_win,
+                self.sim_p_upset_freq,
+                self.sim_p_upset_win,
             ),
         )
         conn.commit()

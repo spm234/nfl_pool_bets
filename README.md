@@ -183,19 +183,67 @@ game at a time) yourself, same as any other CLI command.
 also available locally — it fetches for every game any "my" entry is
 assigned to that week, without needing per-game `--away`/`--home` args.
 
+## Future weeks: lookahead spreads and simulation calibration
+
+The Odds API only carries real lines for the upcoming week or two — sportsbooks
+don't post point spreads for games months out. For everything past that,
+two Google Sheets (season-long projection grids: one row per team, one
+column per week 1-18) fill the gap:
+
+- **Spread sheet → `import-lookahead-spreads`**: loads point spreads for
+  every future week in one pass, into the same `game.favorite`/
+  `spread_margin` fields the Odds API writes to. These are estimates
+  (`spread_source = 'lookahead_sheet'`) — same rule as everywhere else:
+  never authoritative for 10x qualification without `confirm-spread`. A
+  spread already marked `spread_confirmed` is never overwritten by this
+  or any later fetch — confirmed values are sticky regardless of source
+  or ordering.
+  ```
+  python -m pool.cli import-lookahead-spreads --season 2026 --sheet <sheet-id-or-url>
+  ```
+- **Moneyline sheet → `calibrate-simulation`**: moneyline odds convert to
+  implied win probability, not a point spread — different thing, kept
+  separate. This can't inform per-entry future-week win probability
+  directly (future weeks' random team assignments aren't knowable in
+  advance), so instead it calibrates the Monte Carlo simulator's *global*
+  assumptions from real season-wide data: across the whole schedule, what
+  fraction of games are actually 10+-point spreads (`sim_p_upset_freq`),
+  and what's the real average win probability of the underdog side in
+  those specific games (`sim_p_upset_win`) — replacing the fixed guesses
+  (0.20, 0.22) `SimAssumptions` previously defaulted to. Saved to
+  `pool_config`, used by every simulation from then on.
+  ```
+  python -m pool.cli calibrate-simulation --spread-sheet <id-or-url> --moneyline-sheet <id-or-url>
+  ```
+  Run against the real 2026 schedule, this found upsets are considerably
+  rarer than the old guess assumed (5% of games qualify as 10+-point
+  spreads, not 20%) and the real average underdog win probability in
+  those games is ~19%, not 22%.
+
+Both accept `--file`/`--spread-file`/`--moneyline-file` for a local CSV
+instead of a live Google Sheet, same pattern as `import-week`.
+
 ## Live data (Phase 4) — what was built and what wasn't
 
 - **Spread estimates**: `pool/live_data.py` fetches from
   [The Odds API](https://the-odds-api.com) (needs a free-tier key in
   `THE_ODDS_API_KEY` or `--api-key`) — a documented, scriptable JSON API,
   not a scrape. Every value it returns is stored with
-  `is_authoritative_for_upset = 0` and printed as an "EARLY ESTIMATE." The
-  only way to mark a spread authoritative for 10x-upset qualification is
-  `confirm-spread`, which you run after checking your actual settlement
-  source (`spread_source_name` in config — set it to whatever you check;
-  it's not tied to any particular publication) yourself. This confirm step
-  is deliberately not automated: a fetched line is a market estimate, and
-  the pool's real qualification source may not agree with it.
+  `is_authoritative_for_upset = 0` in the `market_snapshot` audit log, and
+  also written straight to `game.favorite`/`spread_margin` (tagged
+  `spread_source = 'odds_api'`) so recommendations and the Scenario
+  Projector actually reflect it — same rule as the lookahead sheet above:
+  current week → Odds API (real line), future weeks → lookahead sheet
+  (projection); whichever you actually run for a given game is what ends
+  up there. The only way to mark a spread authoritative for 10x-upset
+  qualification is `confirm-spread`, which you run after checking your
+  actual settlement source (`spread_source_name` in config — set it to
+  whatever you check; it's not tied to any particular publication)
+  yourself — and which sets `game.spread_confirmed = 1`, permanently
+  locking out any later estimate (fetched or lookahead) from overwriting
+  it. This confirm step is deliberately not automated: a fetched or
+  projected line is a model estimate, and the pool's real qualification
+  source may not agree with it.
 - **Results**: `fetch-result` pulls a completed game's final score from the
   same Odds API and records the outcome — same API key, no new dependency.
   Unlike spreads, there's no separate confirm step for results, since a

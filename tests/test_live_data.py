@@ -76,6 +76,34 @@ def test_save_spread_snapshot_never_authoritative(conn):
     assert row["is_authoritative_for_upset"] == 0
 
 
+def test_save_spread_snapshot_updates_game_for_recommendations(conn):
+    # Unconfirmed estimates now DO feed game.favorite/spread_margin (so
+    # recommendations/the Scenario Projector reflect them) — just never
+    # marked authoritative for 10x qualification.
+    est = live_data.SpreadEstimate("home", 3.5, "The Odds API, median of 4 books", "2026-09-09T00:00:00+00:00")
+    live_data.save_spread_snapshot(conn, 2026, 1, "Atlanta", "Pittsburgh", est)
+    game = conn.execute("SELECT favorite, spread_margin, spread_confirmed, spread_source FROM game").fetchone()
+    assert game["favorite"] == "home"
+    assert game["spread_margin"] == 3.5
+    assert game["spread_confirmed"] == 0
+    assert game["spread_source"] == "odds_api"
+
+
+def test_save_spread_snapshot_never_overwrites_confirmed_game(conn):
+    live_data.confirm_spread(conn, 2026, 1, "Atlanta", "Pittsburgh", "away", 7.0, "real source")
+    est = live_data.SpreadEstimate("home", 3.5, "The Odds API, median of 4 books", "2026-09-09T00:00:00+00:00")
+    live_data.save_spread_snapshot(conn, 2026, 1, "Atlanta", "Pittsburgh", est)
+
+    game = conn.execute("SELECT favorite, spread_margin, spread_confirmed FROM game").fetchone()
+    assert game["favorite"] == "away"  # untouched by the later estimate
+    assert game["spread_margin"] == 7.0
+    assert game["spread_confirmed"] == 1
+
+    # the estimate is still logged for the audit trail, just never applied
+    snapshots = conn.execute("SELECT COUNT(*) AS n FROM market_snapshot").fetchone()
+    assert snapshots["n"] == 2
+
+
 def test_confirm_spread_is_authoritative_and_updates_game(conn):
     game_id = live_data.confirm_spread(
         conn, 2026, 1, "Atlanta", "Pittsburgh", "home", 10.0, "Cleveland Plain Dealer"
@@ -87,9 +115,12 @@ def test_confirm_spread_is_authoritative_and_updates_game(conn):
     assert snap["is_authoritative_for_upset"] == 1
     assert snap["margin"] == 10.0
 
-    game = conn.execute("SELECT favorite, spread_margin FROM game WHERE id = ?", (game_id,)).fetchone()
+    game = conn.execute(
+        "SELECT favorite, spread_margin, spread_confirmed FROM game WHERE id = ?", (game_id,)
+    ).fetchone()
     assert game["favorite"] == "home"
     assert game["spread_margin"] == 10.0
+    assert game["spread_confirmed"] == 1
 
 
 def _fake_scores_requests(events):

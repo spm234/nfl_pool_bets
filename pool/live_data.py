@@ -227,6 +227,15 @@ def save_spread_snapshot(
     home_team: str,
     estimate: SpreadEstimate,
 ) -> int:
+    """Logs the estimate to market_snapshot (audit trail, always
+    is_authoritative_for_upset=0) AND updates game.favorite/spread_margin
+    directly — so recommendations, the Scenario Projector, etc. actually
+    reflect it — UNLESS the game's spread has already been confirmed
+    (game.spread_confirmed=1), which always wins and is never overwritten
+    by an estimate. The game's own favorite/spread_margin is still just an
+    estimate in that case; is_authoritative_for_upset on the log entry
+    (never 1 here) is what actually gates 10x-upset qualification.
+    """
     week_id = db.get_or_create_week(conn, season_year, week_number)
     game_id = db.get_or_create_game(conn, week_id, away_team, home_team)
     cur = conn.execute(
@@ -237,6 +246,15 @@ def save_spread_snapshot(
         """,
         (game_id, estimate.fetched_at, estimate.favorite, estimate.margin, estimate.source),
     )
+    existing = conn.execute(
+        "SELECT spread_confirmed FROM game WHERE id = ?", (game_id,)
+    ).fetchone()
+    if not (existing and existing["spread_confirmed"]):
+        favorite = None if estimate.favorite == "even" else estimate.favorite
+        conn.execute(
+            "UPDATE game SET favorite = ?, spread_margin = ?, spread_source = 'odds_api' WHERE id = ?",
+            (favorite, estimate.margin, game_id),
+        )
     conn.commit()
     return cur.lastrowid
 
@@ -267,7 +285,7 @@ def confirm_spread(
         (game_id, fetched_at, favorite or "even", margin, source_name),
     )
     conn.execute(
-        "UPDATE game SET favorite = ?, spread_margin = ? WHERE id = ?",
+        "UPDATE game SET favorite = ?, spread_margin = ?, spread_confirmed = 1, spread_source = 'confirmed' WHERE id = ?",
         (favorite, margin, game_id),
     )
     conn.commit()

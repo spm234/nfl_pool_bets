@@ -8,10 +8,37 @@ SCHEMA_PATH = Path(__file__).resolve().parent.parent / "sql" / "schema.sql"
 DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "pool.db"
 
 
+# Columns added to existing tables after their initial CREATE TABLE.
+# CREATE TABLE IF NOT EXISTS is a no-op against an already-existing table,
+# so a DB created before one of these was added (e.g. the one already
+# committed to this repo) needs an explicit ALTER TABLE to pick it up.
+_MIGRATIONS = [
+    ("game", "spread_confirmed", "INTEGER NOT NULL DEFAULT 0"),
+    ("game", "spread_source", "TEXT"),
+    ("pool_config", "sim_p_win", "REAL NOT NULL DEFAULT 0.50"),
+    ("pool_config", "sim_p_upset_freq", "REAL NOT NULL DEFAULT 0.20"),
+    ("pool_config", "sim_p_upset_win", "REAL NOT NULL DEFAULT 0.22"),
+]
+
+
+def _run_migrations(conn: sqlite3.Connection) -> None:
+    tables_present = {
+        r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    }
+    for table, column, decl in _MIGRATIONS:
+        if table not in tables_present:
+            continue  # fresh DB — schema.sql (run by init_db) creates it with all columns
+        existing_cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in existing_cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+    conn.commit()
+
+
 def connect(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.execute("PRAGMA foreign_keys = ON")
     conn.row_factory = sqlite3.Row
+    _run_migrations(conn)
     return conn
 
 
@@ -24,6 +51,7 @@ def init_db(
     try:
         conn.executescript(SCHEMA_PATH.read_text())
         conn.execute("INSERT OR IGNORE INTO pool_config (id) VALUES (1)")
+        _run_migrations(conn)
         existing = conn.execute("SELECT COUNT(*) AS n FROM entry WHERE is_mine = 1").fetchone()
         if existing["n"] == 0:
             for name in my_entry_names:

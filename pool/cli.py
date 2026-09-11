@@ -115,6 +115,63 @@ def cmd_import_week_sheet(args):
     conn.close()
 
 
+def cmd_import_lookahead_spreads(args):
+    """Loads a full-season point-spread lookahead grid — for future weeks
+    the live Odds API fetch doesn't have real lines for yet. Never
+    overwrites a game whose spread is already confirmed.
+    """
+    conn = db.connect(args.db)
+    if args.sheet:
+        try:
+            text = live_data.fetch_google_sheet_csv(args.sheet, gid=args.gid)
+        except live_data.LiveDataError as e:
+            print(f"Could not fetch the sheet: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        text = _read_text(args.file)
+    count = importer.import_lookahead_spreads(conn, args.season, text)
+    print(f"Loaded {count} game-week spreads from the lookahead sheet for season {args.season}.")
+    print("These are estimates (spread_source='lookahead_sheet'), not authoritative for 10x qualification.")
+    conn.close()
+
+
+def cmd_calibrate_simulation(args):
+    """Derives p_upset_freq / p_upset_win for the Monte Carlo simulator from
+    real season-wide spread + moneyline data instead of the fixed defaults,
+    and saves them to pool_config.
+    """
+    conn = db.connect(args.db)
+    try:
+        if args.spread_sheet:
+            spread_text = live_data.fetch_google_sheet_csv(args.spread_sheet)
+        else:
+            spread_text = Path(args.spread_file).read_text()
+        if args.moneyline_sheet:
+            moneyline_text = live_data.fetch_google_sheet_csv(args.moneyline_sheet)
+        else:
+            moneyline_text = Path(args.moneyline_file).read_text()
+    except live_data.LiveDataError as e:
+        print(f"Could not fetch a sheet: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    calibration = importer.calibrate_from_lookahead_sheets(spread_text, moneyline_text)
+    if calibration is None:
+        print("Could not calibrate — no games found in the spread sheet.", file=sys.stderr)
+        sys.exit(1)
+
+    cfg = PoolConfig.load(conn)
+    cfg.sim_p_upset_freq = calibration.p_upset_freq
+    cfg.sim_p_upset_win = calibration.p_upset_win
+    cfg.save(conn)
+    print(
+        f"Calibrated from {calibration.games_considered} scheduled games "
+        f"({calibration.qualifying_games} qualify as 10+-point spreads):"
+    )
+    print(f"  sim_p_upset_freq = {calibration.p_upset_freq:.3f}")
+    print(f"  sim_p_upset_win  = {calibration.p_upset_win:.3f}")
+    conn.close()
+
+
 def cmd_record_result(args):
     conn = db.connect(args.db)
     # Only pass fields that were actually given, so e.g. recording the
@@ -382,6 +439,9 @@ def cmd_weekly(args):
         runs=args.runs,
         min_bet=cfg.min_bet,
         start_points=cfg.start_points,
+        p_win=cfg.sim_p_win,
+        p_upset_freq=cfg.sim_p_upset_freq,
+        p_upset_win=cfg.sim_p_upset_win,
     )
     recs = build_weekly_recommendations(
         entry_inputs, assumptions, cfg.payouts, cfg.entry_fee, aggression=args.aggression,
@@ -477,6 +537,28 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--sheet", required=True, help="Sheet ID or full share URL")
     sp.add_argument("--gid", default=None, help="Specific tab's gid, if not the first tab")
     sp.set_defaults(func=cmd_import_week_sheet)
+
+    sp = sub.add_parser(
+        "import-lookahead-spreads",
+        help="Load a full-season point-spread grid (one row per team, one column per "
+        "week) for future weeks the live Odds API doesn't have real lines for yet",
+    )
+    sp.add_argument("--season", type=int, required=True)
+    sp.add_argument("--sheet", default=None, help="Sheet ID or full share URL")
+    sp.add_argument("--gid", default=None, help="Specific tab's gid, if not the first tab")
+    sp.add_argument("--file", default=None, help="Local CSV file instead of --sheet")
+    sp.set_defaults(func=cmd_import_lookahead_spreads)
+
+    sp = sub.add_parser(
+        "calibrate-simulation",
+        help="Derive Monte Carlo p_upset_freq/p_upset_win from real season-wide spread "
+        "+ moneyline data instead of fixed guesses, and save to config",
+    )
+    sp.add_argument("--spread-sheet", default=None, help="Spread lookahead sheet ID or URL")
+    sp.add_argument("--spread-file", default=None, help="Local spread CSV instead of --spread-sheet")
+    sp.add_argument("--moneyline-sheet", default=None, help="Moneyline lookahead sheet ID or URL")
+    sp.add_argument("--moneyline-file", default=None, help="Local moneyline CSV instead of --moneyline-sheet")
+    sp.set_defaults(func=cmd_calibrate_simulation)
 
     sp = sub.add_parser("record-result", help="Record a game's spread and/or outcome")
     sp.add_argument("--season", type=int, required=True)

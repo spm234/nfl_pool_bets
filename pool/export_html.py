@@ -312,6 +312,7 @@ def _scenario_table(conn, cfg, entry_id, start_points, weeks_remaining, field_si
     assumptions = SimAssumptions(
         weeks_remaining=weeks_remaining, field_size=field_size, runs=400,
         min_bet=cfg.min_bet, start_points=cfg.start_points,
+        p_win=cfg.sim_p_win, p_upset_freq=cfg.sim_p_upset_freq, p_upset_win=cfg.sim_p_upset_win,
     )
     rows = []
     for label, sub, frac, take_upset in scenarios:
@@ -380,6 +381,7 @@ def _entry_sections(
                 assumptions = SimAssumptions(
                     weeks_remaining=weeks_remaining, field_size=field_size, runs=1500,
                     min_bet=cfg.min_bet, start_points=cfg.start_points,
+                    p_win=cfg.sim_p_win, p_upset_freq=cfg.sim_p_upset_freq, p_upset_win=cfg.sim_p_upset_win,
                 )
                 rec = build_weekly_recommendations(
                     [entry_input], assumptions, cfg.payouts, cfg.entry_fee, seed=1,
