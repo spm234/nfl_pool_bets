@@ -223,6 +223,51 @@ def cmd_fetch_result(args):
     conn.close()
 
 
+def cmd_fetch_results(args):
+    """Fetches completed scores for every game in a week that doesn't
+    already have an outcome recorded -- not just 'my' entries' games,
+    since field reconstruction and the Scenario Projector both use every
+    game's outcome. A game that hasn't finished yet is skipped, not
+    treated as a failure -- that's the normal case mid-week. Built for
+    unattended use (e.g. a GitHub Action triggered with just
+    --season/--week), not just interactive use.
+    """
+    conn = db.connect(args.db)
+    games = conn.execute(
+        """
+        SELECT away_team, home_team, outcome FROM game
+        WHERE week_id = (SELECT id FROM week WHERE season_year = ? AND week_number = ?)
+        ORDER BY id
+        """,
+        (args.season, args.week),
+    ).fetchall()
+
+    if not games:
+        print(f"No games recorded for week {args.week} yet — nothing to fetch.")
+        conn.close()
+        return
+
+    updated = 0
+    for g in games:
+        away, home = g["away_team"], g["home_team"]
+        if g["outcome"] is not None:
+            continue  # already settled, don't spend an API call re-checking
+        try:
+            result = live_data.fetch_completed_score(away, home, api_key=args.api_key)
+        except live_data.LiveDataError as e:
+            print(f"  {away} @ {home}: not fetched yet ({e})")
+            continue
+        importer.record_game_result(conn, args.season, args.week, away, home, outcome=result.outcome)
+        print(
+            f"  {away} {result.away_score} @ {home} {result.home_score} "
+            f"[{result.source}] -> outcome recorded as '{result.outcome}'"
+        )
+        updated += 1
+
+    conn.close()
+    print(f"Recorded {updated} new result(s) for week {args.week}.")
+
+
 def cmd_record_my_pick(args):
     conn = db.connect(args.db)
     importer.record_my_pick(
@@ -608,6 +653,16 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--home", required=True)
     sp.add_argument("--api-key", default=None)
     sp.set_defaults(func=cmd_fetch_result)
+
+    sp = sub.add_parser(
+        "fetch-results",
+        help="Fetch completed scores for every game in a week that doesn't have an "
+        "outcome recorded yet, no per-game args needed — built for unattended/scripted use",
+    )
+    sp.add_argument("--season", type=int, required=True)
+    sp.add_argument("--week", type=int, required=True)
+    sp.add_argument("--api-key", default=None)
+    sp.set_defaults(func=cmd_fetch_results)
 
     sp = sub.add_parser("record-my-pick", help="Record one of my entries' pick/bet for a week")
     sp.add_argument("--season", type=int, required=True)

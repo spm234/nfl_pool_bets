@@ -202,6 +202,20 @@ game at a time) yourself, same as any other CLI command.
 also available locally — it fetches for every game any "my" entry is
 assigned to that week, without needing per-game `--away`/`--home` args.
 
+## Fetching results the same way
+
+`.github/workflows/fetch-results.yml` mirrors the spreads workflow (same
+repo secret, same one-time setup already done above): Actions tab →
+"Fetch results" → "Run workflow", enter season/week. It fetches the final
+score for every game in that week that doesn't already have an outcome
+recorded — not just "my" games, since the Field tab and the Scenario
+Projector both need every game's outcome — and commits `pool.db` back.
+Games that haven't finished yet are skipped, not treated as a failure, so
+it's safe to re-run mid-Sunday as more games wrap up.
+
+`fetch-results --season Y --week N` is also available locally, same
+command the Action runs.
+
 ## Future weeks: lookahead spreads and simulation calibration
 
 The Odds API only carries real lines for the upcoming week or two — sportsbooks
