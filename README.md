@@ -216,6 +216,31 @@ it's safe to re-run mid-Sunday as more games wrap up.
 `fetch-results --season Y --week N` is also available locally, same
 command the Action runs.
 
+### Keeping standings caught up automatically (`sync-results`)
+
+`fetch-results` needs a `--season`/`--week` you supply yourself. `sync-results`
+doesn't: it checks every game in the database, any season/week, that doesn't
+have an outcome recorded yet, and fetches whatever's finished — this is the
+"yesterday's games" command. `timeline`/`field`/`export-html` all compute a
+standing's current points live from `game.outcome` (`compute_my_entry_timeline`,
+`compute_field_reconstruction`), so a result `sync-results` records shows up
+immediately, no separate step needed.
+
+```
+python -m pool.cli sync-results
+python -m pool.cli sync-results --days-from 5   # look further back than the default 3
+```
+
+`.github/workflows/sync-results.yml` runs this daily (11:00 UTC, well after
+Sunday/Monday/Thursday games finish) and commits the updated `pool.db` back
+to the branch, same secret (`THE_ODDS_API_KEY`) and same pattern as the
+other two workflows — nothing else to set up if you already added that
+secret. Note: GitHub only runs `schedule`-triggered workflows on the repo's
+default branch, so the daily run won't actually fire until this workflow
+lands on `main` (or whatever the default branch is) — `workflow_dispatch`
+(Actions tab → "Sync results" → "Run workflow") works from any branch in
+the meantime.
+
 ## Future weeks: lookahead spreads and simulation calibration
 
 The Odds API only carries real lines for the upcoming week or two — sportsbooks
@@ -440,6 +465,11 @@ python -m loser_pool.cli full-plan --season 2026 --entry SPM --from-week 1 --thr
 python -m loser_pool.cli record-pick --season 2026 --week 1 --entry SPM --team Jaguars --mine
 python -m loser_pool.cli fetch-result --season 2026 --week 1 --away Jaguars --home Browns
 python -m loser_pool.cli settle-week --season 2026 --week 1
+
+# Or in one pass, no --season/--week needed: fetches every game across the
+# whole DB that's missing an outcome (e.g. yesterday's games) and settles
+# every week that gets one, so `status` reflects it right away.
+python -m loser_pool.cli sync-results
 
 python -m loser_pool.cli status --season 2026
 python -m loser_pool.cli playoff-reset --after-week 18 --note "no winner after regular season"

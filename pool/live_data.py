@@ -48,6 +48,16 @@ class GameResult:
     fetched_at: str
 
 
+@dataclass
+class ResultSyncOutcome:
+    season_year: int
+    week_number: int
+    away_team: str
+    home_team: str
+    outcome: Optional[str] = None
+    error: Optional[str] = None
+
+
 class LiveDataError(Exception):
     pass
 
@@ -217,6 +227,47 @@ def fetch_completed_score(
         outcome=outcome, home_score=home_score, away_score=away_score,
         source="The Odds API", fetched_at=fetched_at,
     )
+
+
+def sync_pending_results(
+    conn: sqlite3.Connection, *, api_key: Optional[str] = None, days_from: int = 3
+) -> List[ResultSyncOutcome]:
+    """Fetches and records outcomes for every game in the database — any
+    season, any week — that doesn't have one yet, in one pass. This is how
+    "yesterday's games" get picked up without having to know or pass which
+    week they belong to: `days_from` (same meaning as fetch_completed_score's
+    own parameter) is how far back the Odds API's /scores endpoint looks, so
+    the default of 3 comfortably covers "yesterday" plus a buffer for a
+    Thursday/Monday game. A game that hasn't finished yet (or isn't found in
+    that window) is skipped, not an error — same as fetch_completed_score's
+    normal mid-week case. Standings computed live from game.outcome (e.g.
+    compute_my_entry_timeline) reflect a recorded result immediately, with
+    no separate settle step needed.
+    """
+    from . import importer
+
+    games = conn.execute(
+        """
+        SELECT g.away_team, g.home_team, w.season_year, w.week_number
+        FROM game g
+        JOIN week w ON w.id = g.week_id
+        WHERE g.outcome IS NULL
+        ORDER BY w.season_year, w.week_number, g.id
+        """
+    ).fetchall()
+
+    out: List[ResultSyncOutcome] = []
+    for g in games:
+        away, home = g["away_team"], g["home_team"]
+        season_year, week_number = g["season_year"], g["week_number"]
+        try:
+            result = fetch_completed_score(away, home, api_key=api_key, days_from=days_from)
+        except LiveDataError as e:
+            out.append(ResultSyncOutcome(season_year, week_number, away, home, error=str(e)))
+            continue
+        importer.record_game_result(conn, season_year, week_number, away, home, outcome=result.outcome)
+        out.append(ResultSyncOutcome(season_year, week_number, away, home, outcome=result.outcome))
+    return out
 
 
 def save_spread_snapshot(

@@ -164,6 +164,34 @@ def cmd_record_pick(args):
     conn.close()
 
 
+def cmd_sync_results(args):
+    """Fetches and records outcomes for every game missing one, across every
+    season/week in one pass, then settles every affected week — no
+    --season/--week needed. This is the "yesterday's games" command: run it
+    any time (e.g. Monday morning, or on a schedule) and `status`'s
+    lives-remaining/eliminated standings reflect whatever finished recently.
+    """
+    conn = db.connect(args.db)
+    outcomes = live_data.sync_pending_results(conn, api_key=args.api_key, days_from=args.days_from)
+    if not outcomes:
+        print("No games are missing an outcome — nothing to sync.")
+        conn.close()
+        return
+
+    updated = 0
+    weeks_touched = set()
+    for o in outcomes:
+        if o.error:
+            print(f"  wk{o.week_number} {o.away_team} @ {o.home_team}: not fetched yet ({o.error})")
+            continue
+        print(f"  wk{o.week_number} {o.away_team} @ {o.home_team}: outcome recorded as '{o.outcome}'")
+        updated += 1
+        weeks_touched.add(o.week_number)
+    weeks_str = ", ".join(str(w) for w in sorted(weeks_touched)) or "none"
+    print(f"Synced {updated} new result(s), settled week(s) {weeks_str}.")
+    conn.close()
+
+
 def cmd_settle_week(args):
     conn = db.connect(args.db)
     results = picks.settle_week(conn, args.season, args.week)
@@ -355,6 +383,19 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--season", type=int, required=True)
     sp.add_argument("--week", type=int, required=True)
     sp.set_defaults(func=cmd_settle_week)
+
+    sp = sub.add_parser(
+        "sync-results",
+        help="Fetch and record outcomes for every game missing one, across every season/week, "
+        "then settle those weeks — no --season/--week needed (e.g. yesterday's games).",
+    )
+    sp.add_argument("--api-key", default=None)
+    sp.add_argument(
+        "--days-from", type=int, default=3,
+        help="How many days back the Odds API looks for completed games (default 3, "
+        "comfortably covers yesterday plus a Thu/Mon game)",
+    )
+    sp.set_defaults(func=cmd_sync_results)
 
     sp = sub.add_parser("playoff-reset", help="Trigger the 'all teams reset' playoff rule")
     sp.add_argument("--after-week", type=int, required=True)

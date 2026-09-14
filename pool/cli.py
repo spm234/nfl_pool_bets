@@ -268,6 +268,35 @@ def cmd_fetch_results(args):
     print(f"Recorded {updated} new result(s) for week {args.week}.")
 
 
+def cmd_sync_results(args):
+    """Like fetch-results, but for every game missing an outcome across the
+    whole database — no --season/--week needed. This is the "yesterday's
+    games" command: run it any time (e.g. Monday morning, or on a daily
+    schedule) and it picks up whatever finished recently, whatever week it
+    belongs to. Standings (timeline/field/export-html) compute live from
+    game.outcome, so they reflect a newly-recorded result immediately.
+    """
+    conn = db.connect(args.db)
+    outcomes = live_data.sync_pending_results(conn, api_key=args.api_key, days_from=args.days_from)
+    if not outcomes:
+        print("No games are missing an outcome — nothing to sync.")
+        conn.close()
+        return
+
+    updated = 0
+    weeks_touched = set()
+    for o in outcomes:
+        if o.error:
+            print(f"  wk{o.week_number} {o.away_team} @ {o.home_team}: not fetched yet ({o.error})")
+            continue
+        print(f"  wk{o.week_number} {o.away_team} @ {o.home_team}: outcome recorded as '{o.outcome}'")
+        updated += 1
+        weeks_touched.add(o.week_number)
+    weeks_str = ", ".join(str(w) for w in sorted(weeks_touched)) or "none"
+    print(f"Synced {updated} new result(s), week(s) {weeks_str}.")
+    conn.close()
+
+
 def cmd_record_my_pick(args):
     conn = db.connect(args.db)
     importer.record_my_pick(
@@ -663,6 +692,20 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--week", type=int, required=True)
     sp.add_argument("--api-key", default=None)
     sp.set_defaults(func=cmd_fetch_results)
+
+    sp = sub.add_parser(
+        "sync-results",
+        help="Fetch and record outcomes for every game missing one, across every season/week "
+        "in one pass (e.g. yesterday's games) — no --season/--week needed. Standings read "
+        "game.outcome live, so timeline/field/export-html reflect it immediately.",
+    )
+    sp.add_argument("--api-key", default=None)
+    sp.add_argument(
+        "--days-from", type=int, default=3,
+        help="How many days back the Odds API looks for completed games (default 3, "
+        "comfortably covers yesterday plus a Thu/Mon game)",
+    )
+    sp.set_defaults(func=cmd_sync_results)
 
     sp = sub.add_parser("record-my-pick", help="Record one of my entries' pick/bet for a week")
     sp.add_argument("--season", type=int, required=True)
