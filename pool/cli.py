@@ -99,6 +99,90 @@ def cmd_import_week_csv(args):
     conn.close()
 
 
+def cmd_import_week_picks(args):
+    conn = db.connect(args.db)
+    text = _read_text(args.file)
+    entries, wagers = importer.import_week_field_picks(conn, args.season, args.week, text)
+    print(
+        f"Imported {entries} entries for week {args.week}; recorded {wagers} declared "
+        f"picks/bets as real observations (not inferred)."
+    )
+    conn.close()
+
+
+def cmd_import_week_sheet(args):
+    conn = db.connect(args.db)
+    try:
+        text = live_data.fetch_google_sheet_csv(args.sheet, gid=args.gid)
+    except live_data.LiveDataError as e:
+        print(f"Could not fetch the sheet: {e}", file=sys.stderr)
+        sys.exit(1)
+    try:
+        count = importer.import_week_csv(conn, args.season, args.week, text)
+    except ValueError as e:
+        print(f"Import failed: {e}", file=sys.stderr)
+        sys.exit(1)
+    print(f"Imported {count} entries from Google Sheet for week {args.week}.")
+    conn.close()
+
+
+def cmd_import_lookahead_spreads(args):
+    """Loads a full-season point-spread lookahead grid — for future weeks
+    the live Odds API fetch doesn't have real lines for yet. Never
+    overwrites a game whose spread is already confirmed.
+    """
+    conn = db.connect(args.db)
+    if args.sheet:
+        try:
+            text = live_data.fetch_google_sheet_csv(args.sheet, gid=args.gid)
+        except live_data.LiveDataError as e:
+            print(f"Could not fetch the sheet: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        text = _read_text(args.file)
+    count = importer.import_lookahead_spreads(conn, args.season, text)
+    print(f"Loaded {count} game-week spreads from the lookahead sheet for season {args.season}.")
+    print("These are estimates (spread_source='lookahead_sheet'), not authoritative for 10x qualification.")
+    conn.close()
+
+
+def cmd_calibrate_simulation(args):
+    """Derives p_upset_freq / p_upset_win for the Monte Carlo simulator from
+    real season-wide spread + moneyline data instead of the fixed defaults,
+    and saves them to pool_config.
+    """
+    conn = db.connect(args.db)
+    try:
+        if args.spread_sheet:
+            spread_text = live_data.fetch_google_sheet_csv(args.spread_sheet)
+        else:
+            spread_text = Path(args.spread_file).read_text()
+        if args.moneyline_sheet:
+            moneyline_text = live_data.fetch_google_sheet_csv(args.moneyline_sheet)
+        else:
+            moneyline_text = Path(args.moneyline_file).read_text()
+    except live_data.LiveDataError as e:
+        print(f"Could not fetch a sheet: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    calibration = importer.calibrate_from_lookahead_sheets(spread_text, moneyline_text)
+    if calibration is None:
+        print("Could not calibrate — no games found in the spread sheet.", file=sys.stderr)
+        sys.exit(1)
+
+    cfg = PoolConfig.load(conn)
+    cfg.sim_p_upset_freq = calibration.p_upset_freq
+    cfg.sim_p_upset_win = calibration.p_upset_win
+    cfg.save(conn)
+    print(
+        f"Calibrated from {calibration.games_considered} scheduled games "
+        f"({calibration.qualifying_games} qualify as 10+-point spreads):"
+    )
+    print(f"  sim_p_upset_freq = {calibration.p_upset_freq:.3f}")
+    print(f"  sim_p_upset_win  = {calibration.p_upset_win:.3f}")
+    conn.close()
+
+
 def cmd_record_result(args):
     conn = db.connect(args.db)
     # Only pass fields that were actually given, so e.g. recording the
@@ -139,6 +223,51 @@ def cmd_fetch_result(args):
     conn.close()
 
 
+def cmd_fetch_results(args):
+    """Fetches completed scores for every game in a week that doesn't
+    already have an outcome recorded -- not just 'my' entries' games,
+    since field reconstruction and the Scenario Projector both use every
+    game's outcome. A game that hasn't finished yet is skipped, not
+    treated as a failure -- that's the normal case mid-week. Built for
+    unattended use (e.g. a GitHub Action triggered with just
+    --season/--week), not just interactive use.
+    """
+    conn = db.connect(args.db)
+    games = conn.execute(
+        """
+        SELECT away_team, home_team, outcome FROM game
+        WHERE week_id = (SELECT id FROM week WHERE season_year = ? AND week_number = ?)
+        ORDER BY id
+        """,
+        (args.season, args.week),
+    ).fetchall()
+
+    if not games:
+        print(f"No games recorded for week {args.week} yet — nothing to fetch.")
+        conn.close()
+        return
+
+    updated = 0
+    for g in games:
+        away, home = g["away_team"], g["home_team"]
+        if g["outcome"] is not None:
+            continue  # already settled, don't spend an API call re-checking
+        try:
+            result = live_data.fetch_completed_score(away, home, api_key=args.api_key)
+        except live_data.LiveDataError as e:
+            print(f"  {away} @ {home}: not fetched yet ({e})")
+            continue
+        importer.record_game_result(conn, args.season, args.week, away, home, outcome=result.outcome)
+        print(
+            f"  {away} {result.away_score} @ {home} {result.home_score} "
+            f"[{result.source}] -> outcome recorded as '{result.outcome}'"
+        )
+        updated += 1
+
+    conn.close()
+    print(f"Recorded {updated} new result(s) for week {args.week}.")
+
+
 def cmd_record_my_pick(args):
     conn = db.connect(args.db)
     importer.record_my_pick(
@@ -173,6 +302,48 @@ def cmd_fetch_spread(args):
     cfg = PoolConfig.load(conn)
     print(f"Confirm against {cfg.spread_source_name} before trusting this for upset qualification.")
     conn.close()
+
+
+def cmd_fetch_my_spreads(args):
+    """Fetches an early spread estimate for every game one of 'my' entries
+    is assigned to this week — no per-game args needed, since it reads the
+    assignments already in the DB. Built for unattended use (e.g. a GitHub
+    Action triggered with just --season/--week), not just interactive use.
+    """
+    conn = db.connect(args.db)
+    games = conn.execute(
+        """
+        SELECT DISTINCT g.away_team, g.home_team
+        FROM assignment a
+        JOIN entry e ON e.id = a.entry_id
+        JOIN game g ON g.id = a.game_id
+        WHERE e.is_mine = 1 AND g.week_id = (
+            SELECT id FROM week WHERE season_year = ? AND week_number = ?
+        )
+        """,
+        (args.season, args.week),
+    ).fetchall()
+
+    if not games:
+        print(f"No assignments logged for any of my entries in week {args.week} yet — nothing to fetch.")
+        conn.close()
+        return
+
+    failures = 0
+    for g in games:
+        away, home = g["away_team"], g["home_team"]
+        try:
+            estimate = live_data.fetch_spread_estimate(away, home, api_key=args.api_key)
+        except live_data.LiveDataError as e:
+            print(f"  {away} @ {home}: could not fetch ({e})", file=sys.stderr)
+            failures += 1
+            continue
+        live_data.save_spread_snapshot(conn, args.season, args.week, away, home, estimate)
+        print(f"  {away} @ {home}: {estimate.favorite} favored by {estimate.margin} [{estimate.source}] (early estimate)")
+
+    conn.close()
+    if failures:
+        sys.exit(1)
 
 
 def cmd_confirm_spread(args):
@@ -298,12 +469,10 @@ def cmd_weekly(args):
         timeline = compute_my_entry_timeline(conn, entry_id, cfg)
         current_points = timeline.current_points
         spread = margin if favorite != side else -margin
-        is_upset_opportunity = abs(spread) >= cfg.upset_spread_threshold
         entry_inputs.append(
             {
                 "name": name,
                 "current_points": current_points,
-                "is_upset_opportunity": is_upset_opportunity,
                 "away": away,
                 "home": home,
                 "side": side,
@@ -326,15 +495,22 @@ def cmd_weekly(args):
         runs=args.runs,
         min_bet=cfg.min_bet,
         start_points=cfg.start_points,
+        p_win=cfg.sim_p_win,
+        p_upset_freq=cfg.sim_p_upset_freq,
+        p_upset_win=cfg.sim_p_upset_win,
     )
     recs = build_weekly_recommendations(
-        entry_inputs, assumptions, cfg.payouts, cfg.entry_fee, aggression=args.aggression
+        entry_inputs, assumptions, cfg.payouts, cfg.entry_fee, aggression=args.aggression,
+        upset_threshold=cfg.upset_spread_threshold,
+        upset_multiplier=cfg.upset_multiplier,
+        counts_favorite_loss=cfg.upset_counts_favorite_loss,
     )
 
     print(f"\n=== Week {args.week} recommendations ===")
     for e, rec in zip(entry_inputs, recs):
         print(f"\n{rec.entry_name} — {e['away']} @ {e['home']} (you: {e['side']}), spread {e['spread']}")
         print(f"  Current points: {rec.current_points}")
+        print(f"  Recommended pick: {rec.recommended_pick}")
         print(f"  Recommended bet: {rec.recommended_bet}")
         print(f"  Reasoning: {rec.recommended_pick_reasoning}")
         s = rec.sim_result
@@ -407,6 +583,50 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--file", help="Read from this file instead of stdin")
     sp.set_defaults(func=cmd_import_week_csv)
 
+    sp = sub.add_parser(
+        "import-week-picks",
+        help="Import REAL declared picks/bets for the whole field (header: Rank,Team "
+        "Name,Total Pts,Team 1,Win/Lose,Team 2,Bet Amount) — a direct observation, "
+        "not something reconstructed from a point delta",
+    )
+    sp.add_argument("--season", type=int, required=True)
+    sp.add_argument("--week", type=int, required=True)
+    sp.add_argument("--file", help="Read from this file instead of stdin")
+    sp.set_defaults(func=cmd_import_week_picks)
+
+    sp = sub.add_parser(
+        "import-week-sheet",
+        help="Same as import-week, but fetched live from a public Google Sheet "
+        "(must be shared 'Anyone with the link can view')",
+    )
+    sp.add_argument("--season", type=int, required=True)
+    sp.add_argument("--week", type=int, required=True)
+    sp.add_argument("--sheet", required=True, help="Sheet ID or full share URL")
+    sp.add_argument("--gid", default=None, help="Specific tab's gid, if not the first tab")
+    sp.set_defaults(func=cmd_import_week_sheet)
+
+    sp = sub.add_parser(
+        "import-lookahead-spreads",
+        help="Load a full-season point-spread grid (one row per team, one column per "
+        "week) for future weeks the live Odds API doesn't have real lines for yet",
+    )
+    sp.add_argument("--season", type=int, required=True)
+    sp.add_argument("--sheet", default=None, help="Sheet ID or full share URL")
+    sp.add_argument("--gid", default=None, help="Specific tab's gid, if not the first tab")
+    sp.add_argument("--file", default=None, help="Local CSV file instead of --sheet")
+    sp.set_defaults(func=cmd_import_lookahead_spreads)
+
+    sp = sub.add_parser(
+        "calibrate-simulation",
+        help="Derive Monte Carlo p_upset_freq/p_upset_win from real season-wide spread "
+        "+ moneyline data instead of fixed guesses, and save to config",
+    )
+    sp.add_argument("--spread-sheet", default=None, help="Spread lookahead sheet ID or URL")
+    sp.add_argument("--spread-file", default=None, help="Local spread CSV instead of --spread-sheet")
+    sp.add_argument("--moneyline-sheet", default=None, help="Moneyline lookahead sheet ID or URL")
+    sp.add_argument("--moneyline-file", default=None, help="Local moneyline CSV instead of --moneyline-sheet")
+    sp.set_defaults(func=cmd_calibrate_simulation)
+
     sp = sub.add_parser("record-result", help="Record a game's spread and/or outcome")
     sp.add_argument("--season", type=int, required=True)
     sp.add_argument("--week", type=int, required=True)
@@ -434,6 +654,16 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--api-key", default=None)
     sp.set_defaults(func=cmd_fetch_result)
 
+    sp = sub.add_parser(
+        "fetch-results",
+        help="Fetch completed scores for every game in a week that doesn't have an "
+        "outcome recorded yet, no per-game args needed — built for unattended/scripted use",
+    )
+    sp.add_argument("--season", type=int, required=True)
+    sp.add_argument("--week", type=int, required=True)
+    sp.add_argument("--api-key", default=None)
+    sp.set_defaults(func=cmd_fetch_results)
+
     sp = sub.add_parser("record-my-pick", help="Record one of my entries' pick/bet for a week")
     sp.add_argument("--season", type=int, required=True)
     sp.add_argument("--week", type=int, required=True)
@@ -453,6 +683,16 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--home", required=True)
     sp.add_argument("--api-key", default=None)
     sp.set_defaults(func=cmd_fetch_spread)
+
+    sp = sub.add_parser(
+        "fetch-my-spreads",
+        help="Fetch early spread estimates for every game any 'my' entry is assigned to "
+        "this week, no per-game args needed — built for unattended/scripted use",
+    )
+    sp.add_argument("--season", type=int, required=True)
+    sp.add_argument("--week", type=int, required=True)
+    sp.add_argument("--api-key", default=None)
+    sp.set_defaults(func=cmd_fetch_my_spreads)
 
     sp = sub.add_parser("confirm-spread", help="Record a manually-confirmed, authoritative spread")
     sp.add_argument("--season", type=int, required=True)

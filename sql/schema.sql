@@ -38,7 +38,13 @@ CREATE TABLE IF NOT EXISTS pool_config (
     -- Config-driven so it can be flipped without touching code once confirmed.
     upset_counts_favorite_loss INTEGER NOT NULL DEFAULT 1,
     -- Modeled field size for the simulator when no better estimate is available.
-    default_field_size         INTEGER NOT NULL DEFAULT 107
+    default_field_size         INTEGER NOT NULL DEFAULT 107,
+    -- Monte Carlo assumptions (SimAssumptions defaults). Calibratable from
+    -- real season data via calibrate_simulation_assumptions() rather than
+    -- left as arbitrary guesses — see pool/calibrate.py.
+    sim_p_win                  REAL    NOT NULL DEFAULT 0.50,
+    sim_p_upset_freq           REAL    NOT NULL DEFAULT 0.20,
+    sim_p_upset_win            REAL    NOT NULL DEFAULT 0.22
 );
 
 CREATE TABLE IF NOT EXISTS owner (
@@ -71,6 +77,15 @@ CREATE TABLE IF NOT EXISTS game (
     home_team       TEXT NOT NULL,
     favorite        TEXT CHECK (favorite IN ('home','away') OR favorite IS NULL),
     spread_margin   REAL NOT NULL DEFAULT 0,
+    -- Sticky: once set by confirm_spread(), no estimate (fetched or
+    -- lookahead-sheet) is ever allowed to overwrite favorite/spread_margin
+    -- again. This is what lets fetched/imported estimates populate
+    -- favorite/spread_margin directly (so recommendations reflect them)
+    -- without risking a real confirmed line getting silently clobbered.
+    spread_confirmed INTEGER NOT NULL DEFAULT 0,
+    -- Where the current favorite/spread_margin came from: 'odds_api',
+    -- 'lookahead_sheet', or 'confirmed'. Informational only.
+    spread_source   TEXT,
     outcome         TEXT CHECK (outcome IN ('home','away','tie') OR outcome IS NULL),
     UNIQUE(week_id, away_team, home_team)
 );

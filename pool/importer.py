@@ -11,11 +11,14 @@ matching it against that week's already-imported schedule.
 """
 from __future__ import annotations
 
+import csv
+import io
+import re
 import sqlite3
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
-from . import db
+from . import db, nfl_teams
 
 
 def _split_line(line: str) -> List[str]:
@@ -229,6 +232,114 @@ def record_game_result(
     return game_id
 
 
+_FIELD_PICK_MAP = {"WIN": "WIN", "LOSE": "LOSS", "LOSS": "LOSS", "TIE": "TIE"}
+
+
+@dataclass
+class FieldPickRow:
+    name: str
+    points: Optional[float]
+    away_team: str
+    home_team: str
+    pick: Optional[str]  # None = not yet declared
+    bet: Optional[float]
+
+
+def _detect_delimiter(text: str) -> str:
+    first_line = text.strip("\n").splitlines()[0] if text.strip("\n") else ""
+    return "\t" if "\t" in first_line else ","
+
+
+def parse_week_field_picks(csv_text: str) -> List[FieldPickRow]:
+    """Parses the pool's "picks made" export: one row per entry with
+    Rank, Team Name, Total Pts, Team 1 (away), Win/Lose, Team 2 (home),
+    Bet Amount. Unlike import_week_csv's standings-only shape, this format
+    carries the actual DECLARED pick and bet for every entry in the field —
+    not just mine — so it's raw observation, not reconstruction/inference.
+
+    Tab- or comma-delimited (whichever the paste uses); a header row is
+    detected and skipped automatically by checking whether the 3rd column
+    parses as a number. A blank pick/bet (not yet declared as of the paste)
+    is kept as None rather than guessed at.
+    """
+    delimiter = _detect_delimiter(csv_text)
+    reader = csv.reader(io.StringIO(csv_text.strip("\n")), delimiter=delimiter)
+    rows = [row for row in reader if any(c.strip() for c in row)]
+    if not rows:
+        return []
+    if len(rows[0]) >= 3:
+        try:
+            float(rows[0][2])
+        except ValueError:
+            rows = rows[1:]  # header row
+
+    out = []
+    for row in rows:
+        if len(row) < 7:
+            continue
+        _rank, name, total_pts, team1, pick_raw, team2, bet_raw = (c.strip() for c in row[:7])
+        if not name:
+            continue
+        pick = _FIELD_PICK_MAP.get(pick_raw.upper()) if pick_raw else None
+        bet: Optional[float]
+        try:
+            bet = float(bet_raw) if bet_raw else None
+        except ValueError:
+            bet = None
+        try:
+            points = float(total_pts) if total_pts else None
+        except ValueError:
+            points = None
+        out.append(
+            FieldPickRow(
+                name=name, points=points, away_team=team1, home_team=team2, pick=pick, bet=bet
+            )
+        )
+    return out
+
+
+def import_week_field_picks(
+    conn: sqlite3.Connection, season_year: int, week_number: int, csv_text: str
+) -> Tuple[int, int]:
+    """Records the REAL declared pick and bet for every entry in the field
+    (mine included) for a week — a direct observation, not something
+    reconstructed from a point delta. Every entry is assigned the away team
+    (confirmed convention, see import_week_csv). An entry with no pick/bet
+    yet declared still gets its assignment/standings recorded, just no
+    wager_observation row. Returns (entries_seen, wagers_recorded).
+    """
+    week_id = db.get_or_create_week(conn, season_year, week_number)
+    rows = parse_week_field_picks(csv_text)
+    wagers = 0
+    for r in rows:
+        game_id = db.get_or_create_game(conn, week_id, r.away_team, r.home_team)
+        entry_id = db.get_or_create_entry(conn, owner_name=r.name, display_name=r.name)
+        assignment_id = db.get_or_create_assignment(conn, entry_id, game_id, "away")
+        if r.points is not None:
+            conn.execute(
+                """
+                INSERT INTO entry_week_points (entry_id, week_id, points)
+                VALUES (?, ?, ?)
+                ON CONFLICT(entry_id, week_id) DO UPDATE SET points = excluded.points
+                """,
+                (entry_id, week_id, r.points),
+            )
+        if r.pick is not None and r.bet is not None:
+            conn.execute(
+                """
+                INSERT INTO wager_observation (assignment_id, declared_pick, declared_bet, is_late_default)
+                VALUES (?, ?, ?, 0)
+                ON CONFLICT(assignment_id) DO UPDATE SET
+                    declared_pick = excluded.declared_pick,
+                    declared_bet = excluded.declared_bet
+                """,
+                (assignment_id, r.pick, r.bet),
+            )
+            wagers += 1
+    conn.commit()
+    return len(rows), wagers
+
+
 def record_my_pick(
     conn: sqlite3.Connection,
     season_year: int,
@@ -259,3 +370,182 @@ def record_my_pick(
     )
     conn.commit()
     return assignment_id
+
+
+# --- Season-long "lookahead" grids (spread and moneyline) ---
+#
+# Both share the same layout: one row per team (full mascot name), one
+# column per week (1-18), each cell either "BYE", "TBD  @OPP"/"TBD  VS OPP"
+# (no line posted that far out yet), or "<value>  @OPP"/"<value>  VS OPP"
+# where <value> is a signed number relative to the row's own team (a point
+# spread in one sheet, American moneyline odds in the other) and @/VS says
+# whether the row's team is away/home. A leading backslash is tolerated
+# (artifact of some markdown table renderers) but not required.
+
+_LOOKAHEAD_CELL_RE = re.compile(
+    r"^\\?([+-]?\d+(?:\.\d+)?|TBD)\s+(@|VS)\s*([A-Za-z]+)$", re.IGNORECASE
+)
+
+
+@dataclass
+class LookaheadCell:
+    week_number: int
+    away_team: str  # short name (nfl_teams convention)
+    home_team: str
+    value: float  # relative to the row's own team; sign only meaningful for spreads
+    row_team_is_away: bool
+
+
+def _parse_lookahead_grid(csv_text: str) -> List[LookaheadCell]:
+    reader = csv.reader(io.StringIO(csv_text.strip()))
+    rows = list(reader)
+    if not rows:
+        return []
+    header = rows[0]
+    week_numbers = []
+    for col in header[1:]:
+        col = col.strip()
+        if col.isdigit():
+            week_numbers.append(int(col))
+        else:
+            week_numbers.append(None)
+
+    out: List[LookaheadCell] = []
+    for row in rows[1:]:
+        if not row or not row[0].strip():
+            continue
+        team_short = nfl_teams.FULL_TO_SHORT.get(row[0].strip())
+        if team_short is None:
+            continue  # unrecognized row label — skip rather than guess
+        for i, cell in enumerate(row[1:]):
+            if i >= len(week_numbers) or week_numbers[i] is None:
+                continue
+            cell = cell.strip()
+            if not cell or cell.upper() == "BYE":
+                continue
+            m = _LOOKAHEAD_CELL_RE.match(cell)
+            if not m:
+                continue
+            value_str, side, opp_code = m.groups()
+            if value_str.upper() == "TBD":
+                continue
+            opp_short = nfl_teams.CODE_TO_SHORT.get(opp_code.upper())
+            if opp_short is None:
+                continue
+            row_team_is_away = side.upper() == "@"
+            away_team = team_short if row_team_is_away else opp_short
+            home_team = opp_short if row_team_is_away else team_short
+            out.append(
+                LookaheadCell(
+                    week_number=week_numbers[i],
+                    away_team=away_team,
+                    home_team=home_team,
+                    value=float(value_str),
+                    row_team_is_away=row_team_is_away,
+                )
+            )
+    return out
+
+
+def import_lookahead_spreads(conn: sqlite3.Connection, season_year: int, csv_text: str) -> int:
+    """Loads a full-season point-spread grid (see module docstring above)
+    into game.favorite/spread_margin for every parseable cell across all
+    18 weeks in one pass — meant for future weeks the live Odds API fetch
+    doesn't have lines for yet. Never overwrites a game whose spread has
+    already been confirmed (game.spread_confirmed = 1); that stays sticky
+    regardless of source or ordering.
+    """
+    count = 0
+    for cell in _parse_lookahead_grid(csv_text):
+        if cell.value == 0:
+            favorite, margin = None, 0.0
+        elif cell.value < 0:
+            favorite = "away" if cell.row_team_is_away else "home"
+            margin = abs(cell.value)
+        else:
+            favorite = "home" if cell.row_team_is_away else "away"
+            margin = cell.value
+
+        week_id = db.get_or_create_week(conn, season_year, cell.week_number)
+        game_id = db.get_or_create_game(conn, week_id, cell.away_team, cell.home_team)
+        existing = conn.execute(
+            "SELECT spread_confirmed FROM game WHERE id = ?", (game_id,)
+        ).fetchone()
+        if existing and existing["spread_confirmed"]:
+            continue
+        conn.execute(
+            "UPDATE game SET favorite = ?, spread_margin = ?, spread_source = 'lookahead_sheet' WHERE id = ?",
+            (favorite, margin, game_id),
+        )
+        count += 1
+    conn.commit()
+    return count
+
+
+def moneyline_to_win_probability(moneyline: float) -> float:
+    """American moneyline odds -> implied win probability (includes the
+    book's vig, so this slightly overstates true probability on both sides
+    of a game — a modeling approximation, not a precise figure).
+    """
+    if moneyline < 0:
+        return -moneyline / (-moneyline + 100)
+    return 100 / (moneyline + 100)
+
+
+@dataclass
+class SimCalibration:
+    p_upset_freq: float  # fraction of scheduled games that qualify as a 10+ point spread
+    p_upset_win: float  # average implied win probability of the underdog side, in those games
+    games_considered: int
+    qualifying_games: int
+
+
+def calibrate_from_lookahead_sheets(
+    spread_csv_text: str,
+    moneyline_csv_text: str,
+    *,
+    upset_threshold: float = 10.0,
+) -> Optional[SimCalibration]:
+    """Derives p_upset_freq and p_upset_win for the Monte Carlo simulator
+    from real season-wide data instead of the fixed guesses SimAssumptions
+    otherwise defaults to. Cannot inform per-entry future-week win
+    probability directly, since future weeks' random assignments aren't
+    knowable in advance — this calibrates the simulator's global
+    assumptions instead: across the whole schedule, what fraction of games
+    are actually 10+-point spreads, and what's the underdog's real average
+    win probability in those games (from the paired moneyline sheet).
+    """
+    spread_cells = _parse_lookahead_grid(spread_csv_text)
+    moneyline_by_key = {}
+    for c in _parse_lookahead_grid(moneyline_csv_text):
+        key = (c.week_number, c.away_team, c.home_team, c.row_team_is_away)
+        moneyline_by_key[key] = c.value
+
+    seen_games = set()
+    qualifying_win_probs = []
+    total_games = 0
+    for c in spread_cells:
+        game_key = (c.week_number, c.away_team, c.home_team)
+        if game_key in seen_games:
+            continue  # each game appears twice (once per team's row) — count once
+        seen_games.add(game_key)
+        total_games += 1
+        if abs(c.value) < upset_threshold:
+            continue
+        # c.value is relative to whichever team this cell came from; find
+        # the underdog side's own moneyline (positive spread = underdog).
+        underdog_is_away = (c.value > 0) == c.row_team_is_away
+        ml = moneyline_by_key.get((c.week_number, c.away_team, c.home_team, underdog_is_away))
+        if ml is None:
+            continue
+        qualifying_win_probs.append(moneyline_to_win_probability(ml))
+
+    if total_games == 0:
+        return None
+    qualifying_games = len(qualifying_win_probs)
+    return SimCalibration(
+        p_upset_freq=qualifying_games / total_games if total_games else 0.0,
+        p_upset_win=(sum(qualifying_win_probs) / qualifying_games) if qualifying_games else 0.0,
+        games_considered=total_games,
+        qualifying_games=qualifying_games,
+    )

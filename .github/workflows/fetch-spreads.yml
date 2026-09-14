@@ -1,0 +1,55 @@
+name: Fetch spreads
+
+# Manual, click-to-run spread fetch — no local Python needed. Fetches an
+# early spread ESTIMATE (never authoritative for 10x qualification on its
+# own — see README) for every game one of "my" entries is assigned to in
+# the given week, and commits the updated pool.db back to this branch.
+#
+# Requires a repo secret named THE_ODDS_API_KEY (Settings -> Secrets and
+# variables -> Actions -> New repository secret).
+
+on:
+  workflow_dispatch:
+    inputs:
+      season:
+        description: "Season year"
+        required: true
+        default: "2026"
+      week:
+        description: "Week number"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -r requirements.txt
+
+      - name: Fetch spread estimates for my entries
+        env:
+          THE_ODDS_API_KEY: ${{ secrets.THE_ODDS_API_KEY }}
+        run: >
+          python -m pool.cli fetch-my-spreads
+          --season "${{ inputs.season }}"
+          --week "${{ inputs.week }}"
+
+      - name: Commit updated database
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add pool.db
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "Auto-fetch spreads: season ${{ inputs.season }}, week ${{ inputs.week }}"
+            git push origin HEAD:"${{ github.ref_name }}"
+          fi

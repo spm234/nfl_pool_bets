@@ -32,10 +32,16 @@ recommendations are three distinct layers, not flattened together:
 1. **Raw observations** — `game` (posted results/spread), `entry_week_points`
    (posted standings, same shape as the manual paste box: "Name, Points" per
    week), `market_snapshot` (fetched spread estimates), `wager_observation`
-   (my own declared picks/bets — I know these directly, they aren't inferred).
+   (declared picks/bets — mine always, and the whole field too whenever the
+   pool's export includes everyone's declaration, via `import-week-picks`;
+   these are known directly, not inferred).
 2. **Inferred data** — `wager_inference`: reconstructed (pick, bet)
    hypotheses for field entries, computed from point deltas via
-   `reconstruct_candidates`, with a confidence ranking.
+   `reconstruct_candidates`, with a confidence ranking. Only used as a
+   fallback: `compute_field_reconstruction` checks `wager_observation` first
+   for each entry and skips inference entirely wherever a real declaration
+   is on file — no need to guess what's already known. The Field tab marks
+   which is which (bold = declared, plain = reconstructed guess).
 3. **Recommendations** — computed on demand by the simulation layer
    (`pool/recommend.py`, `pool/simulation.py`), never persisted.
 
@@ -69,6 +75,14 @@ python -m pool.cli config-set --min-bet 20 --entry-fee 30 \
 # (confirmed: that's how this pool actually works — WIN/LOSS/TIE is your
 # bet on that team, there's no separate "pick the home team instead").
 python -m pool.cli import-week --season 2026 --week 1 --file week1.csv
+
+# If the pool's export includes everyone's DECLARED pick and bet (header:
+# Rank,Team Name,Total Pts,Team 1,Win/Lose,Team 2,Bet Amount), import that
+# instead -- it's a direct observation for the whole field, not a guess
+# reconstructed from a point delta. Covers "mine" too (recording what was
+# actually bet, which can differ from what was recommended). An entry with
+# no pick/bet yet still gets its assignment/standings recorded.
+python -m pool.cli import-week-picks --season 2026 --week 1 --file week1_picks.tsv
 
 # Or piece by piece, if your data doesn't come as one file:
 python -m pool.cli import-schedule --season 2026 --week 1 --file schedule.txt
@@ -125,11 +139,16 @@ whenever you want the published page to reflect the current state.
 - **My Entries** — game log + this week's recommended pick per entry.
 - **Field** — the full field's standings/reconstruction (or aggregate
   counts only, see `--no-field-names` below).
-- **Scenario Projector** — pick a hypothetical outcome per game and a
-  generalized field bet %, and the whole real field's projected standings
-  recompute instantly, entirely in the browser (no server round-trip).
-  Your 3 entries get individual pick/wager controls; the field uses one
-  shared bet-fraction slider assumed to bet WIN on their assigned team.
+- **Scenario Projector** — pick a hypothetical outcome per game (or use a
+  preset: all favorites win, all underdogs win, random, reset), and the
+  whole real field's projected standings recompute instantly, entirely in
+  the browser (no server round-trip). Any entry with a real declared
+  pick/bet on file (via `import-week-picks` or `record-my-pick`) uses it
+  directly — marked "bet placed" — instead of a guess; only entries with
+  nothing declared yet fall back to the generalized field bet-fraction
+  slider (assumed WIN on their assigned team). Your 3 entries' controls
+  default to the real bet but stay editable, for exploring "what if I'd
+  bet differently."
 - **Simulation** — the Monte Carlo P(1st)/top3/top10/expected-payout
   comparison across four bet-sizing policies, for all 3 entries together.
 
@@ -157,19 +176,107 @@ API path wired into this tool for it):
 4. Save. GitHub will give you a URL like
    `https://spm234.github.io/nfl_pool_bets/` within a minute or two.
 
+## Fetching spreads without running Python yourself
+
+`.github/workflows/fetch-spreads.yml` is a click-to-run GitHub Action
+(Actions tab → "Fetch spreads" → "Run workflow", enter season/week) that
+fetches an early spread estimate for every game one of "my" entries is
+assigned to that week, and commits the updated `pool.db` back to the repo
+automatically — no local Python, no terminal.
+
+One-time setup:
+1. **Settings → Secrets and variables → Actions → New repository secret**,
+   name it `THE_ODDS_API_KEY`, paste your key.
+2. That's it — the workflow already exists in this repo.
+
+This is why `pool.db` is tracked in git (not gitignored) as of this
+change: for the Action's fetch to persist anywhere, the database has to
+live somewhere the Action can commit back to. The tradeoff is real and
+worth knowing — your full season's data (assignments, picks, field
+standings) now lives in git history, not just the periodic HTML snapshots
+already published to Pages. If you'd rather keep the database local-only,
+the alternative is running `fetch-my-spreads` (or `fetch-spread` for one
+game at a time) yourself, same as any other CLI command.
+
+`fetch-my-spreads --season Y --week N` (the command the Action runs) is
+also available locally — it fetches for every game any "my" entry is
+assigned to that week, without needing per-game `--away`/`--home` args.
+
+## Fetching results the same way
+
+`.github/workflows/fetch-results.yml` mirrors the spreads workflow (same
+repo secret, same one-time setup already done above): Actions tab →
+"Fetch results" → "Run workflow", enter season/week. It fetches the final
+score for every game in that week that doesn't already have an outcome
+recorded — not just "my" games, since the Field tab and the Scenario
+Projector both need every game's outcome — and commits `pool.db` back.
+Games that haven't finished yet are skipped, not treated as a failure, so
+it's safe to re-run mid-Sunday as more games wrap up.
+
+`fetch-results --season Y --week N` is also available locally, same
+command the Action runs.
+
+## Future weeks: lookahead spreads and simulation calibration
+
+The Odds API only carries real lines for the upcoming week or two — sportsbooks
+don't post point spreads for games months out. For everything past that,
+two Google Sheets (season-long projection grids: one row per team, one
+column per week 1-18) fill the gap:
+
+- **Spread sheet → `import-lookahead-spreads`**: loads point spreads for
+  every future week in one pass, into the same `game.favorite`/
+  `spread_margin` fields the Odds API writes to. These are estimates
+  (`spread_source = 'lookahead_sheet'`) — same rule as everywhere else:
+  never authoritative for 10x qualification without `confirm-spread`. A
+  spread already marked `spread_confirmed` is never overwritten by this
+  or any later fetch — confirmed values are sticky regardless of source
+  or ordering.
+  ```
+  python -m pool.cli import-lookahead-spreads --season 2026 --sheet <sheet-id-or-url>
+  ```
+- **Moneyline sheet → `calibrate-simulation`**: moneyline odds convert to
+  implied win probability, not a point spread — different thing, kept
+  separate. This can't inform per-entry future-week win probability
+  directly (future weeks' random team assignments aren't knowable in
+  advance), so instead it calibrates the Monte Carlo simulator's *global*
+  assumptions from real season-wide data: across the whole schedule, what
+  fraction of games are actually 10+-point spreads (`sim_p_upset_freq`),
+  and what's the real average win probability of the underdog side in
+  those specific games (`sim_p_upset_win`) — replacing the fixed guesses
+  (0.20, 0.22) `SimAssumptions` previously defaulted to. Saved to
+  `pool_config`, used by every simulation from then on.
+  ```
+  python -m pool.cli calibrate-simulation --spread-sheet <id-or-url> --moneyline-sheet <id-or-url>
+  ```
+  Run against the real 2026 schedule, this found upsets are considerably
+  rarer than the old guess assumed (5% of games qualify as 10+-point
+  spreads, not 20%) and the real average underdog win probability in
+  those games is ~19%, not 22%.
+
+Both accept `--file`/`--spread-file`/`--moneyline-file` for a local CSV
+instead of a live Google Sheet, same pattern as `import-week`.
+
 ## Live data (Phase 4) — what was built and what wasn't
 
 - **Spread estimates**: `pool/live_data.py` fetches from
   [The Odds API](https://the-odds-api.com) (needs a free-tier key in
   `THE_ODDS_API_KEY` or `--api-key`) — a documented, scriptable JSON API,
   not a scrape. Every value it returns is stored with
-  `is_authoritative_for_upset = 0` and printed as an "EARLY ESTIMATE." The
-  only way to mark a spread authoritative for 10x-upset qualification is
-  `confirm-spread`, which you run after checking your actual settlement
-  source (`spread_source_name` in config — set it to whatever you check;
-  it's not tied to any particular publication) yourself. This confirm step
-  is deliberately not automated: a fetched line is a market estimate, and
-  the pool's real qualification source may not agree with it.
+  `is_authoritative_for_upset = 0` in the `market_snapshot` audit log, and
+  also written straight to `game.favorite`/`spread_margin` (tagged
+  `spread_source = 'odds_api'`) so recommendations and the Scenario
+  Projector actually reflect it — same rule as the lookahead sheet above:
+  current week → Odds API (real line), future weeks → lookahead sheet
+  (projection); whichever you actually run for a given game is what ends
+  up there. The only way to mark a spread authoritative for 10x-upset
+  qualification is `confirm-spread`, which you run after checking your
+  actual settlement source (`spread_source_name` in config — set it to
+  whatever you check; it's not tied to any particular publication)
+  yourself — and which sets `game.spread_confirmed = 1`, permanently
+  locking out any later estimate (fetched or lookahead) from overwriting
+  it. This confirm step is deliberately not automated: a fetched or
+  projected line is a model estimate, and the pool's real qualification
+  source may not agree with it.
 - **Results**: `fetch-result` pulls a completed game's final score from the
   same Odds API and records the outcome — same API key, no new dependency.
   Unlike spreads, there's no separate confirm step for results, since a
@@ -395,6 +502,55 @@ python -m loser_pool.cli sheet-ownership --file loser_pool_sheet.csv --period "W
   only needs data this tool already has.
 - **No HTML export yet** for this tool (unlike `pool export-html`) — CLI
   only for now.
+
+## Pick recommendation: WIN vs LOSS, actually compared
+
+`recommend.choose_pick` (`pool/recommend.py`) compares betting WIN vs LOSS
+on your assigned team and recommends whichever has higher expected value —
+it does not default to WIN. Win probability comes from a logistic model
+driven by the recorded spread (`scoring.win_prob_from_spread`, ported from
+the original prototype but previously unused anywhere). This matters
+because a favorite betting LOSS against a qualifying spread pays the same
+10x upset bonus as an underdog betting WIN (confirmed rule, see above) —
+sometimes fading your own team is the better play, and the tool will now
+actually say so.
+
+This compares linear expected points only — it does not account for how
+variance interacts with the pool's top-10 payout structure (a long-shot
+upset can be worth more than its raw EV suggests late in the season when
+you're chasing 1st, and worth less if you're just trying to survive). The
+reasoning text shown alongside each recommendation states both picks' EV
+per point so you can see the comparison, not just the conclusion.
+
+## Bet sizing: Kelly criterion, not a flat percentage
+
+`recommend.recommend_bet_size` sizes the stake from the *actual* edge of
+the chosen pick — its model win probability and payout multiplier
+(`recommend.kelly_fraction`) — instead of a flat percentage keyed only to
+whether the pick happens to be a qualifying 10x upset. Previously two picks
+with very different confidence (say a 1.5-point favorite vs. a 5.5-point
+favorite, neither a qualifying upset) got the exact same stake, because
+sizing only looked at the upset/non-upset switch, not the underlying win
+probability. Now the bigger, more confident edge gets a bigger stake.
+
+The `--aggression` setting (0-100) scales how much of *full* Kelly is
+actually bet: 0 → 10% of Kelly, 100 → 75% of Kelly. Full Kelly is never
+used outright — it's theoretically optimal for long-run compounding growth
+of a repeatedly-reinvested bankroll, not for a short, finite, ranked
+tournament with a top-10 payout structure.
+
+This same real win probability and multiplier also feed the Monte Carlo
+simulation for the *immediate* week only (`simulation.EntryPolicy`'s
+`first_week_*` override) — every other, not-yet-known future week still
+falls back to the simulator's generic calibrated assumptions, since future
+matchups aren't knowable yet. So P(1st)/P(top10)/expected payout in the
+weekly output now actually improve for a more confident pick, not just the
+stake size:
+
+```
+SPM   — spread 5.5 (71% win prob):  bet 30, expected payout $54.85
+SPM 2 — spread -1.5 (56% win prob): bet 20, expected payout $28.41
+```
 
 ## What's deliberately thin
 

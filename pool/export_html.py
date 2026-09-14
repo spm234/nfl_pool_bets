@@ -135,6 +135,7 @@ tr:last-child td{border-bottom:none;}
 .stat-tile .n{font-family:'Big Shoulders Display',sans-serif; font-weight:800; font-size:28px; color:var(--amber);}
 .stat-tile .l{font-size:12px; color:var(--chalk-dim); margin-top:2px;}
 .empty-note{font-size:13px; color:var(--chalk-dim); font-style:italic;}
+.confirmed-pick{font-weight:700;}
 .scenario-row{
   display:flex; flex-wrap:wrap; align-items:center; gap:10px;
   padding:9px 0; border-bottom:1px solid rgba(255,255,255,.05);
@@ -146,6 +147,12 @@ tr:last-child td{border-bottom:none;}
   border-radius:5px; padding:5px 8px; font-family:'IBM Plex Mono',monospace; font-size:12.5px;
 }
 .scenario-row input[type=range]{accent-color:var(--amber); flex:1; min-width:100px;}
+.preset-row{display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px;}
+.preset-btn{
+  background:var(--turf-raised-2); color:var(--chalk); border:1px solid var(--line);
+  border-radius:6px; padding:6px 12px; font-size:12.5px; font-weight:600; cursor:pointer;
+}
+.preset-btn:hover{border-color:var(--amber-dim); color:var(--amber);}
 .scenario-mine-card{
   background:var(--turf); border:1px solid var(--line); border-radius:6px;
   padding:10px 12px; display:flex; flex-wrap:wrap; align-items:center; gap:10px; margin-bottom:8px;
@@ -278,12 +285,13 @@ def _entry_assignment(conn, entry_id, season, week):
 def _recommendation_slip(rec, e, cfg) -> str:
     s = rec.sim_result
     spread_html = _spread_label(e["spread"], cfg.upset_spread_threshold)
+    pick_color = "var(--win)" if rec.recommended_pick == "WIN" else "var(--loss)"
     return (
         '<div class="card"><p class="card-title">This week&rsquo;s pick</p>'
         '<div class="slip">'
         '<div class="slip-half">'
-        f'<p class="slip-label">{_esc(e["away"])} @ {_esc(e["home"])} &middot; you: {_esc(e["side"])}</p>'
-        f'<p class="slip-value">{spread_html}</p>'
+        f'<p class="slip-label">{_esc(e["away"])} @ {_esc(e["home"])} &middot; you: {_esc(e["side"])} &middot; {spread_html}</p>'
+        f'<p class="slip-value" style="color:{pick_color}">{_esc(rec.recommended_pick)}</p>'
         f'<p class="slip-reasoning">Current stack: <b class="mono">{rec.current_points:g}</b> pts</p>'
         "</div>"
         '<div class="slip-divider"></div>'
@@ -311,6 +319,7 @@ def _scenario_table(conn, cfg, entry_id, start_points, weeks_remaining, field_si
     assumptions = SimAssumptions(
         weeks_remaining=weeks_remaining, field_size=field_size, runs=400,
         min_bet=cfg.min_bet, start_points=cfg.start_points,
+        p_win=cfg.sim_p_win, p_upset_freq=cfg.sim_p_upset_freq, p_upset_win=cfg.sim_p_upset_win,
     )
     rows = []
     for label, sub, frac, take_upset in scenarios:
@@ -373,16 +382,19 @@ def _entry_sections(
                 spread = margin if favorite != side else -margin
                 entry_input = {
                     "name": e["display_name"], "current_points": tl.current_points,
-                    "is_upset_opportunity": abs(spread) >= cfg.upset_spread_threshold,
                     "away": assignment["away_team"], "home": assignment["home_team"],
                     "side": side, "spread": spread,
                 }
                 assumptions = SimAssumptions(
                     weeks_remaining=weeks_remaining, field_size=field_size, runs=1500,
                     min_bet=cfg.min_bet, start_points=cfg.start_points,
+                    p_win=cfg.sim_p_win, p_upset_freq=cfg.sim_p_upset_freq, p_upset_win=cfg.sim_p_upset_win,
                 )
                 rec = build_weekly_recommendations(
-                    [entry_input], assumptions, cfg.payouts, cfg.entry_fee, seed=1
+                    [entry_input], assumptions, cfg.payouts, cfg.entry_fee, seed=1,
+                    upset_threshold=cfg.upset_spread_threshold,
+                    upset_multiplier=cfg.upset_multiplier,
+                    counts_favorite_loss=cfg.upset_counts_favorite_loss,
                 )[0]
                 section.append(_recommendation_slip(rec, entry_input, cfg))
             else:
@@ -463,7 +475,8 @@ def _scenario_projector_section(
         ],
         "entries": [
             {"name": e.name, "mine": e.is_mine, "away": e.away_team, "home": e.home_team,
-             "side": e.assigned_side, "points": e.points_entering_week}
+             "side": e.assigned_side, "points": e.points_entering_week,
+             "pick": e.declared_pick, "bet": e.declared_bet}
             for e in data.entries
         ],
     }
@@ -540,24 +553,57 @@ def _scenario_projector_section(
     gamesBox.appendChild(row);
   });
 
+  // Quick-fill presets for every game that isn't already settled — a
+  // settled game's real outcome is known, not a hypothetical to override.
+  function applyPreset(kind){
+    DATA.games.forEach(function(g){
+      if(g.outcome) return;
+      var key = g.away+'@'+g.home;
+      var sel = gameSelects[key];
+      if(!sel) return;
+      if(kind==='reset'){ sel.value=''; return; }
+      if(kind==='random'){ sel.value = Math.random()<0.5 ? 'away' : 'home'; return; }
+      // favorites/underdogs: fall back to home team on a pick'em (no
+      // recorded favorite) rather than leaving it undecided.
+      var favSide = g.favorite || 'home';
+      var dogSide = favSide==='home' ? 'away' : 'home';
+      sel.value = kind==='favorites' ? favSide : dogSide;
+    });
+    recompute();
+  }
+  var presetBox = document.getElementById('scenarioPresets');
+  [['favorites','All favorites win'], ['underdogs','All underdogs win'],
+   ['random','Random outcomes'], ['reset','Reset to not decided']].forEach(function(p){
+    var btn = document.createElement('button');
+    btn.type = 'button'; btn.className = 'preset-btn'; btn.textContent = p[1];
+    btn.addEventListener('click', function(){ applyPreset(p[0]); });
+    presetBox.appendChild(btn);
+  });
+
   var minePicks = {}, mineBets = {};
   DATA.entries.filter(function(e){ return e.mine; }).forEach(function(e){
     var card = document.createElement('div');
     card.className = 'scenario-mine-card';
     var name = document.createElement('span');
     name.className = 'name'; name.textContent = e.name;
+    if(e.pick != null){
+      var tag = document.createElement('span');
+      tag.className = 'badge-upset'; tag.textContent = 'bet placed';
+      name.appendChild(tag);
+    }
     var pickLabel = document.createElement('label'); pickLabel.textContent = 'Pick';
     var pickSel = document.createElement('select');
     ['WIN','LOSS','TIE'].forEach(function(p){
       var o = document.createElement('option'); o.value = p; o.textContent = p;
       pickSel.appendChild(o);
     });
-    pickSel.value = 'WIN';
+    pickSel.value = e.pick != null ? e.pick : 'WIN';
     pickSel.addEventListener('change', recompute);
     var betLabel = document.createElement('label'); betLabel.textContent = 'Wager';
     var betInput = document.createElement('input');
     betInput.type = 'number'; betInput.min = 0; betInput.max = e.points;
-    betInput.value = Math.max(Math.min(cfg.minBet, e.points), Math.round(e.points*0.2/10)*10);
+    betInput.value = e.bet != null ? e.bet
+      : Math.max(Math.min(cfg.minBet, e.points), Math.round(e.points*0.2/10)*10);
     betInput.addEventListener('input', recompute);
     minePicks[e.name] = pickSel; mineBets[e.name] = betInput;
     card.appendChild(name);
@@ -582,8 +628,16 @@ def _scenario_projector_section(
         pending = false;
         var pick, bet;
         if(e.mine){
+          // The mine cards default to the real declared pick/bet when one
+          // exists, but stay editable for exploring "what if I'd bet
+          // differently" — always read the live control values.
           pick = minePicks[e.name].value;
           bet = clampBet(e.points, +mineBets[e.name].value);
+        } else if(e.pick != null && e.bet != null){
+          // A real declared pick/bet for this field entry — use it
+          // directly rather than the generic "everyone bets WIN" guess.
+          pick = e.pick;
+          bet = clampBet(e.points, e.bet);
         } else {
           pick = 'WIN';
           bet = clampBet(e.points, e.points*frac);
@@ -622,13 +676,16 @@ def _scenario_projector_section(
 
     return (
         '<div class="card"><p class="card-title">Assumptions</p>'
+        '<div id="scenarioPresets" class="preset-row"></div>'
         '<div id="scenarioGames"></div>'
-        '<div class="scenario-row"><span class="game-label">Field bet % (of current stack)</span>'
+        '<div class="scenario-row"><span class="game-label">Field bet % (of current stack) '
+        "&mdash; only used for entries with no bet on file</span>"
         '<input type="range" id="fieldFrac" min="0" max="60" value="20">'
         '<span id="fieldFracLabel" class="mono">20%</span></div>'
         '<div id="scenarioMine" style="margin-top:10px"></div>'
-        '<p class="empty-note" style="margin-top:8px">Field entries are assumed to bet WIN on their '
-        "assigned team at the field % above; games left “Not decided” leave that entry "
+        '<p class="empty-note" style="margin-top:8px">Entries with a real declared pick/bet on file '
+        "(&ldquo;bet placed&rdquo;) use that directly; everyone else is assumed to bet WIN on their "
+        "assigned team at the field % above. Games left “Not decided” leave that entry "
         "unchanged. Spreads reflect whatever's currently recorded (fetch-spread/confirm-spread) "
         "— pick&rsquo;em if none is set yet. Entirely computed in your browser — nothing "
         "is sent anywhere.</p></div>"
@@ -657,7 +714,12 @@ def _field_summary_section(
         trs = []
         for r in rows:
             cands_raw = ", ".join(f"{c.pick} {c.bet}" for c in r.candidates)
-            cands = _esc(cands_raw) if cands_raw else "&mdash;"
+            if not cands_raw:
+                cands = "&mdash;"
+            elif r.observed:
+                cands = f"<span class='confirmed-pick'>{_esc(cands_raw)}</span>"
+            else:
+                cands = _esc(cands_raw)
             trs.append(
                 f"<tr><td>{_esc(r.entry_name)}</td><td class='mono'>{_esc(r.away_team)}@{_esc(r.home_team)}</td>"
                 f"<td class='mono'>{r.prev_points if r.prev_points is not None else '&mdash;'}</td>"
@@ -666,8 +728,10 @@ def _field_summary_section(
             )
         return (
             '<div class="card">'
+            '<p class="empty-note">Bold = declared pick/bet, directly observed. Plain = a guess '
+            "reconstructed from the week's point change (no declaration on file).</p>"
             '<div class="table-scroll"><table><thead><tr><th>Entry</th><th>Game</th>'
-            f"<th>Prev</th><th>Cur</th><th>&Delta;</th><th>Likely bet</th></tr></thead>"
+            f"<th>Prev</th><th>Cur</th><th>&Delta;</th><th>Pick / bet</th></tr></thead>"
             f"<tbody>{''.join(trs)}</tbody></table></div></div>"
         )
 

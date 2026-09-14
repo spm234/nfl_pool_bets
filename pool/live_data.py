@@ -227,6 +227,15 @@ def save_spread_snapshot(
     home_team: str,
     estimate: SpreadEstimate,
 ) -> int:
+    """Logs the estimate to market_snapshot (audit trail, always
+    is_authoritative_for_upset=0) AND updates game.favorite/spread_margin
+    directly — so recommendations, the Scenario Projector, etc. actually
+    reflect it — UNLESS the game's spread has already been confirmed
+    (game.spread_confirmed=1), which always wins and is never overwritten
+    by an estimate. The game's own favorite/spread_margin is still just an
+    estimate in that case; is_authoritative_for_upset on the log entry
+    (never 1 here) is what actually gates 10x-upset qualification.
+    """
     week_id = db.get_or_create_week(conn, season_year, week_number)
     game_id = db.get_or_create_game(conn, week_id, away_team, home_team)
     cur = conn.execute(
@@ -237,6 +246,15 @@ def save_spread_snapshot(
         """,
         (game_id, estimate.fetched_at, estimate.favorite, estimate.margin, estimate.source),
     )
+    existing = conn.execute(
+        "SELECT spread_confirmed FROM game WHERE id = ?", (game_id,)
+    ).fetchone()
+    if not (existing and existing["spread_confirmed"]):
+        favorite = None if estimate.favorite == "even" else estimate.favorite
+        conn.execute(
+            "UPDATE game SET favorite = ?, spread_margin = ?, spread_source = 'odds_api' WHERE id = ?",
+            (favorite, estimate.margin, game_id),
+        )
     conn.commit()
     return cur.lastrowid
 
@@ -267,8 +285,71 @@ def confirm_spread(
         (game_id, fetched_at, favorite or "even", margin, source_name),
     )
     conn.execute(
-        "UPDATE game SET favorite = ?, spread_margin = ? WHERE id = ?",
+        "UPDATE game SET favorite = ?, spread_margin = ?, spread_confirmed = 1, spread_source = 'confirmed' WHERE id = ?",
         (favorite, margin, game_id),
     )
     conn.commit()
     return game_id
+
+
+_SHEET_ID_RE_MARKERS = ("/d/", "/spreadsheets/")
+
+
+def extract_google_sheet_id(sheet_id_or_url: str) -> str:
+    """Accepts either a bare Sheet ID or a full share URL
+    (https://docs.google.com/spreadsheets/d/<ID>/edit?usp=sharing) and
+    returns just the ID.
+    """
+    s = sheet_id_or_url.strip()
+    if "/d/" in s:
+        s = s.split("/d/", 1)[1]
+        s = s.split("/", 1)[0]
+    return s
+
+
+def fetch_google_sheet_csv(sheet_id_or_url: str, *, gid: Optional[str] = None, timeout: int = 15) -> str:
+    """Fetches a Google Sheet's data as CSV via its public export URL —
+    plain HTTP GET, no OAuth. This only works if the sheet is shared as
+    "Anyone with the link can view" (or more open); a restricted sheet
+    returns an HTML login/permission page instead of CSV, which this
+    detects and raises on rather than silently importing garbage.
+
+    This is a genuinely different case from the officepool4fun.com
+    situation: you control this sheet's sharing setting directly, so
+    there's no login-wall-workaround question — if it's shared openly,
+    a plain GET is exactly what "shared with a link" is for.
+    """
+    try:
+        import requests
+    except ImportError as e:
+        raise LiveDataError(
+            "The 'requests' package is required for Google Sheets fetching. "
+            "Install it with: pip install requests"
+        ) from e
+
+    sheet_id = extract_google_sheet_id(sheet_id_or_url)
+    url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export"
+    params = {"format": "csv"}
+    if gid:
+        params["gid"] = gid
+
+    try:
+        resp = requests.get(url, params=params, timeout=timeout)
+    except requests.RequestException as e:
+        raise LiveDataError(f"Request to Google Sheets failed: {e}") from e
+
+    if resp.status_code != 200:
+        raise LiveDataError(
+            f"Google Sheets returned HTTP {resp.status_code} for sheet {sheet_id}. "
+            "If this is a permissions error, share the sheet as "
+            "'Anyone with the link can view' (Share → General access)."
+        )
+    content_type = resp.headers.get("Content-Type", "")
+    text = resp.text
+    if "text/csv" not in content_type or text.lstrip().startswith("<"):
+        raise LiveDataError(
+            f"Sheet {sheet_id} did not return CSV (got Content-Type: {content_type!r}). "
+            "This usually means the sheet isn't shared publicly — set sharing to "
+            "'Anyone with the link can view' (Share → General access) and try again."
+        )
+    return text

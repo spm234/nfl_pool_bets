@@ -27,6 +27,14 @@ class SimAssumptions:
 class EntryPolicy:
     bet_fraction: float = 0.30
     take_upset: bool = True
+    # Optional override for the very first simulated week, so a real,
+    # already-known pick (real spread -> real win probability, from
+    # recommend.choose_pick) is reflected in P(1st)/P(top10)/expected
+    # payout instead of the generic p_win/p_upset_freq/p_upset_win
+    # assumptions used for every other, not-yet-known future week.
+    first_week_win_prob: Optional[float] = None
+    first_week_mult: Optional[float] = None
+    first_week_bet_fraction: Optional[float] = None
 
 
 @dataclass
@@ -50,10 +58,26 @@ def simulate_one_entry(
     p_upset_win: float,
     min_bet: float,
     rng: random.Random,
+    first_week_win_prob: Optional[float] = None,
+    first_week_mult: Optional[float] = None,
+    first_week_bet_fraction: Optional[float] = None,
 ) -> float:
-    for _ in range(weeks_remaining):
+    for week_index in range(weeks_remaining):
         if points <= 0:
             break
+        if week_index == 0 and first_week_win_prob is not None:
+            week_frac = first_week_bet_fraction if first_week_bet_fraction is not None else frac
+            mult = first_week_mult if first_week_mult is not None else 1.0
+            bet = min_bet if min_bet <= points else points
+            bet = max(bet, round(points * week_frac))
+            bet = min(bet, points)
+            if rng.random() < first_week_win_prob:
+                points += bet * mult
+            else:
+                points -= bet
+            if points < 0:
+                points = 0
+            continue
         qualifies = rng.random() < p_upset_freq
         if qualifies and take_upset:
             bet = min_bet if min_bet <= points else points
@@ -117,6 +141,9 @@ def run_simulation(
                 p_upset_win=a.p_upset_win,
                 min_bet=a.min_bet,
                 rng=rng,
+                first_week_win_prob=pol.first_week_win_prob,
+                first_week_mult=pol.first_week_mult,
+                first_week_bet_fraction=pol.first_week_bet_fraction,
             )
             for i, pol in enumerate(my_policies)
         ]
