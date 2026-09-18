@@ -1,6 +1,7 @@
 from pool.scoring import (
     Game,
     default_late_pick,
+    infer_outcome_from_points,
     is_upset_pick,
     outcome_for_team,
     score_bet,
@@ -170,3 +171,33 @@ def test_default_late_pick_scores_as_declared():
     # home team WIN, pick'em spread, home wins
     result = score_bet(spread=0, pick=late["pick"], bet=late["bet"], outcome="WIN")
     assert result.delta == 20
+
+
+# --- infer_outcome_from_points ---
+
+def test_infer_outcome_win_pick_correct_implies_own_side():
+    assert infer_outcome_from_points("away", "WIN", 150, 200) == "away"
+
+
+def test_infer_outcome_win_pick_incorrect_implies_other_side():
+    assert infer_outcome_from_points("away", "WIN", 150, 100) == "home"
+
+
+def test_infer_outcome_loss_pick_correct_implies_other_side():
+    assert infer_outcome_from_points("away", "LOSS", 150, 270) == "home"
+
+
+def test_infer_outcome_loss_pick_incorrect_implies_own_side():
+    assert infer_outcome_from_points("away", "LOSS", 150, 30) == "away"
+
+
+def test_infer_outcome_tie_pick_correct_implies_tie():
+    assert infer_outcome_from_points("home", "TIE", 150, 1500) == "tie"
+
+
+def test_infer_outcome_tie_pick_incorrect_is_ambiguous():
+    assert infer_outcome_from_points("home", "TIE", 150, 100) is None
+
+
+def test_infer_outcome_zero_delta_is_unresolvable():
+    assert infer_outcome_from_points("away", "WIN", 150, 150) is None

@@ -193,3 +193,69 @@ def test_fetch_my_spreads_exits_nonzero_on_failure(db_path, monkeypatch):
     with pytest.raises(SystemExit) as exc_info:
         cli.cmd_fetch_my_spreads(args)
     assert exc_info.value.code == 1
+
+
+def test_sync_results_no_games_is_a_noop(db_path, capsys):
+    args = Namespace(db=str(db_path), api_key="test-key", days_from=3)
+    cli.cmd_sync_results(args)
+    out = capsys.readouterr().out
+    assert "nothing to sync" in out
+
+
+def test_sync_results_finds_completed_games_across_weeks_without_season_or_week_args(
+    db_path, monkeypatch, capsys
+):
+    conn = db.connect(db_path)
+    importer.import_schedule(conn, 2026, 1, "Atlanta, Pittsburgh\n")
+    importer.import_schedule(conn, 2026, 2, "Buffalo, Houston\n")
+    conn.close()
+
+    fake_requests = _fake_scores_get(
+        [
+            {
+                "away_team": "Atlanta", "home_team": "Pittsburgh", "completed": True,
+                "scores": [{"name": "Atlanta", "score": "17"}, {"name": "Pittsburgh", "score": "24"}],
+            },
+            {
+                "away_team": "Buffalo", "home_team": "Houston", "completed": False, "scores": None,
+            },
+        ]
+    )
+    monkeypatch.setitem(sys.modules, "requests", fake_requests)
+
+    args = Namespace(db=str(db_path), api_key="test-key", days_from=3)
+    cli.cmd_sync_results(args)
+    out = capsys.readouterr().out
+    assert "wk1 Atlanta @ Pittsburgh: outcome recorded as 'home'" in out
+    assert "wk2 Buffalo @ Houston: not fetched yet" in out
+    assert "Synced 1 new result(s), week(s) 1." in out
+
+    conn = db.connect(db_path)
+    rows = {
+        (r["away_team"], r["home_team"]): r["outcome"]
+        for r in conn.execute("SELECT away_team, home_team, outcome FROM game")
+    }
+    assert rows[("Atlanta", "Pittsburgh")] == "home"
+    assert rows[("Buffalo", "Houston")] is None
+    conn.close()
+
+
+def test_sync_results_skips_games_already_settled(db_path, monkeypatch, capsys):
+    conn = db.connect(db_path)
+    importer.import_schedule(conn, 2026, 1, "Atlanta, Pittsburgh\n")
+    importer.record_game_result(conn, 2026, 1, "Atlanta", "Pittsburgh", outcome="away")
+    conn.close()
+
+    fetched = []
+
+    def fake_get(url, params=None, timeout=None):
+        fetched.append(1)
+        return _FakeResponse([])
+
+    monkeypatch.setitem(sys.modules, "requests", types.SimpleNamespace(get=fake_get, RequestException=Exception))
+
+    args = Namespace(db=str(db_path), api_key="test-key", days_from=3)
+    cli.cmd_sync_results(args)
+    assert len(fetched) == 0  # already-settled game never triggers an API call
+    out = capsys.readouterr().out
+    assert "nothing to sync" in out

@@ -216,6 +216,77 @@ it's safe to re-run mid-Sunday as more games wrap up.
 `fetch-results --season Y --week N` is also available locally, same
 command the Action runs.
 
+### Keeping standings caught up automatically (`sync-results`)
+
+`fetch-results` needs a `--season`/`--week` you supply yourself. `sync-results`
+doesn't: it checks every game in the database, any season/week, that doesn't
+have an outcome recorded yet, and fetches whatever's finished — this is the
+"yesterday's games" command. `timeline`/`field`/`export-html` all compute a
+standing's current points live from `game.outcome` (`compute_my_entry_timeline`,
+`compute_field_reconstruction`), so a result `sync-results` records shows up
+immediately, no separate step needed.
+
+```
+python -m pool.cli sync-results
+python -m pool.cli sync-results --days-from 5   # look further back than the default 3
+```
+
+`.github/workflows/sync-results.yml` runs this daily (11:00 UTC, well after
+Sunday/Monday/Thursday games finish) and commits the updated `pool.db` back
+to the branch, same secret (`THE_ODDS_API_KEY`) and same pattern as the
+other two workflows — nothing else to set up if you already added that
+secret. Note: GitHub only runs `schedule`-triggered workflows on the repo's
+default branch, so the daily run won't actually fire until this workflow
+lands on `main` (or whatever the default branch is) — `workflow_dispatch`
+(Actions tab → "Sync results" → "Run workflow") works from any branch in
+the meantime.
+
+### Results without the Odds API at all (`infer-results`)
+
+Assume `THE_ODDS_API_KEY` may simply never get set up — that's a real gap,
+not a hypothetical, since it depends on signing up for a free-tier key and
+wiring it into a repo secret. `fetch-results`/`sync-results` above both stop
+working entirely without it. But there's a second, independent source of
+truth for results that's always available: the operator's own posted
+standings. If an entry's declared pick/bet for a game is known (`SPM`/`SPM
+2`/`SPM 3`'s own picks, or any field entry imported via
+`import-week-picks`), then that entry's own point delta between two
+consecutive weeks' posted totals tells you exactly whether their pick won
+or lost — which, combined with which side they picked, tells you the
+game's actual outcome. No score, no API call, just arithmetic on numbers
+you already pasted in.
+
+`import-standings` and `import-week` both run this automatically —
+whenever you paste in a new week's totals, the *previous* week's game
+outcomes that are now revealed by the point deltas get inferred and
+recorded, for free. `infer-results` is the same thing exposed directly, for
+reprocessing a week by hand:
+
+```
+python -m pool.cli infer-results --season 2026 --week 1
+```
+
+This never overwrites a game that already has a real recorded outcome
+(fetched, manually recorded, or already inferred) — a real result always
+wins. And where two different entries' own picks imply *different*
+outcomes for the same game (a mis-typed point total or a stale pick
+somewhere), it reports that game as a conflict and leaves it unresolved
+rather than guessing:
+
+```
+Inferred 14 game outcome(s) for week 1 from week 2's posted points.
+  CONFLICT: Atlanta @ Pittsburgh — different entries' declared picks imply different
+  outcomes (likely a bad point total or stale pick somewhere) — left unresolved.
+```
+
+One real caveat, same one `fetch-result` documents for the API path: a
+game that was actually tied at the end of regulation (any WIN/LOSS pick
+loses on that, by the pool's rule) is indistinguishable, from one entry's
+point delta alone, from that entry simply having picked the losing side —
+both score identically for them. Regulation ties are rare enough that this
+is an acceptable fallback, not a substitute for a real recorded result
+once one becomes available.
+
 ## Future weeks: lookahead spreads and simulation calibration
 
 The Odds API only carries real lines for the upcoming week or two — sportsbooks
@@ -440,6 +511,11 @@ python -m loser_pool.cli full-plan --season 2026 --entry SPM --from-week 1 --thr
 python -m loser_pool.cli record-pick --season 2026 --week 1 --entry SPM --team Jaguars --mine
 python -m loser_pool.cli fetch-result --season 2026 --week 1 --away Jaguars --home Browns
 python -m loser_pool.cli settle-week --season 2026 --week 1
+
+# Or in one pass, no --season/--week needed: fetches every game across the
+# whole DB that's missing an outcome (e.g. yesterday's games) and settles
+# every week that gets one, so `status` reflects it right away.
+python -m loser_pool.cli sync-results
 
 python -m loser_pool.cli status --season 2026
 python -m loser_pool.cli playoff-reset --after-week 18 --note "no winner after regular season"

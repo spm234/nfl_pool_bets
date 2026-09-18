@@ -183,6 +183,30 @@ def cmd_calibrate_simulation(args):
     conn.close()
 
 
+def cmd_infer_results(args):
+    """Infers a week's game outcomes from the point deltas between it and
+    the following week's posted standings, for any entry with a declared
+    pick/bet — no Odds API / THE_ODDS_API_KEY needed, since the operator's
+    own posted totals already carry the result. import-standings and
+    import-week already do this automatically for the week right before
+    whatever week they just applied; this is for reprocessing a week by
+    hand (e.g. after declaring a late pick, or if THE_ODDS_API_KEY is
+    simply never going to be set up and results only ever arrive this way).
+    """
+    conn = db.connect(args.db)
+    summary = importer.infer_results_from_points(conn, args.season, args.week)
+    print(
+        f"Inferred {summary.resolved} game outcome(s) for week {args.week} "
+        f"from week {args.week + 1}'s posted points."
+    )
+    for away, home in summary.conflicting_games:
+        print(
+            f"  CONFLICT: {away} @ {home} — different entries' declared picks imply different "
+            "outcomes (likely a bad point total or stale pick somewhere) — left unresolved."
+        )
+    conn.close()
+
+
 def cmd_record_result(args):
     conn = db.connect(args.db)
     # Only pass fields that were actually given, so e.g. recording the
@@ -266,6 +290,35 @@ def cmd_fetch_results(args):
 
     conn.close()
     print(f"Recorded {updated} new result(s) for week {args.week}.")
+
+
+def cmd_sync_results(args):
+    """Like fetch-results, but for every game missing an outcome across the
+    whole database — no --season/--week needed. This is the "yesterday's
+    games" command: run it any time (e.g. Monday morning, or on a daily
+    schedule) and it picks up whatever finished recently, whatever week it
+    belongs to. Standings (timeline/field/export-html) compute live from
+    game.outcome, so they reflect a newly-recorded result immediately.
+    """
+    conn = db.connect(args.db)
+    outcomes = live_data.sync_pending_results(conn, api_key=args.api_key, days_from=args.days_from)
+    if not outcomes:
+        print("No games are missing an outcome — nothing to sync.")
+        conn.close()
+        return
+
+    updated = 0
+    weeks_touched = set()
+    for o in outcomes:
+        if o.error:
+            print(f"  wk{o.week_number} {o.away_team} @ {o.home_team}: not fetched yet ({o.error})")
+            continue
+        print(f"  wk{o.week_number} {o.away_team} @ {o.home_team}: outcome recorded as '{o.outcome}'")
+        updated += 1
+        weeks_touched.add(o.week_number)
+    weeks_str = ", ".join(str(w) for w in sorted(weeks_touched)) or "none"
+    print(f"Synced {updated} new result(s), week(s) {weeks_str}.")
+    conn.close()
 
 
 def cmd_record_my_pick(args):
@@ -627,6 +680,16 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--moneyline-file", default=None, help="Local moneyline CSV instead of --moneyline-sheet")
     sp.set_defaults(func=cmd_calibrate_simulation)
 
+    sp = sub.add_parser(
+        "infer-results",
+        help="Infer a week's game outcomes from point deltas vs. the following week's posted "
+        "standings — no Odds API needed (import-standings/import-week already do this "
+        "automatically; use this to reprocess a week by hand).",
+    )
+    sp.add_argument("--season", type=int, required=True)
+    sp.add_argument("--week", type=int, required=True)
+    sp.set_defaults(func=cmd_infer_results)
+
     sp = sub.add_parser("record-result", help="Record a game's spread and/or outcome")
     sp.add_argument("--season", type=int, required=True)
     sp.add_argument("--week", type=int, required=True)
@@ -663,6 +726,20 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--week", type=int, required=True)
     sp.add_argument("--api-key", default=None)
     sp.set_defaults(func=cmd_fetch_results)
+
+    sp = sub.add_parser(
+        "sync-results",
+        help="Fetch and record outcomes for every game missing one, across every season/week "
+        "in one pass (e.g. yesterday's games) — no --season/--week needed. Standings read "
+        "game.outcome live, so timeline/field/export-html reflect it immediately.",
+    )
+    sp.add_argument("--api-key", default=None)
+    sp.add_argument(
+        "--days-from", type=int, default=3,
+        help="How many days back the Odds API looks for completed games (default 3, "
+        "comfortably covers yesterday plus a Thu/Mon game)",
+    )
+    sp.set_defaults(func=cmd_sync_results)
 
     sp = sub.add_parser("record-my-pick", help="Record one of my entries' pick/bet for a week")
     sp.add_argument("--season", type=int, required=True)

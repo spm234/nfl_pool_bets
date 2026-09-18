@@ -1,0 +1,59 @@
+name: Sync results
+
+# Daily, hands-off result sync: fetches the final score for every game
+# across the whole database (any season/week) that doesn't already have an
+# outcome recorded -- e.g. yesterday's completed games -- and commits the
+# updated pool.db back to this branch. Unlike "Fetch results", this needs
+# no season/week input: it's the "keep standings caught up on yesterday's
+# games" command, meant to run unattended every day. A game that hasn't
+# finished yet is skipped, not an error -- safe to run daily all season.
+#
+# Requires a repo secret named THE_ODDS_API_KEY (Settings -> Secrets and
+# variables -> Actions -> New repository secret) -- the same one used by
+# the "Fetch spreads" and "Fetch results" workflows.
+
+on:
+  workflow_dispatch:
+    inputs:
+      days_from:
+        description: "How many days back to look for completed games"
+        required: false
+        default: "3"
+  schedule:
+    # 11:00 UTC daily -- comfortably after Sunday/Monday/Thursday games
+    # finish, so "yesterday's games" are always in the lookback window.
+    - cron: "0 11 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: pip install -r requirements.txt
+
+      - name: Sync any pending game results
+        env:
+          THE_ODDS_API_KEY: ${{ secrets.THE_ODDS_API_KEY }}
+        run: >
+          python -m pool.cli sync-results
+          --days-from "${{ inputs.days_from || '3' }}"
+
+      - name: Commit updated database
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add pool.db
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "Auto-sync results: $(date -u +%Y-%m-%d)"
+            git push origin HEAD:"${{ github.ref_name }}"
+          fi
