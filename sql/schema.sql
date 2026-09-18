@@ -44,7 +44,12 @@ CREATE TABLE IF NOT EXISTS pool_config (
     -- left as arbitrary guesses — see pool/calibrate.py.
     sim_p_win                  REAL    NOT NULL DEFAULT 0.50,
     sim_p_upset_freq           REAL    NOT NULL DEFAULT 0.20,
-    sim_p_upset_win            REAL    NOT NULL DEFAULT 0.22
+    sim_p_upset_win            REAL    NOT NULL DEFAULT 0.22,
+    -- How much of full Kelly recommend.recommend_bet_size actually stakes:
+    -- 0 -> 10% of Kelly, 100 -> 75% of Kelly (never full Kelly — see that
+    -- function's docstring). This is the default `weekly`/`export-html`
+    -- use when --aggression isn't passed explicitly.
+    recommend_aggression       REAL    NOT NULL DEFAULT 50
 );
 
 CREATE TABLE IF NOT EXISTS owner (

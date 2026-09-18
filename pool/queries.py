@@ -270,9 +270,16 @@ def get_scenario_projection_data(
 ) -> ScenarioData:
     """Everyone (mine + field) with an assignment this week, plus the games
     they're tied to — the raw material for a client-side 'what if this game
-    goes this way' standings projector. points_entering_week is each entry's
-    standing as of the end of the *previous* week (or start_points for week
-    1), matching what a pre-game hypothetical should be based on.
+    goes this way' standings projector. points_entering_week is each
+    entry's own posted total AT this week (or start_points for week 1) —
+    matching the pool's own weekly export convention (confirmed against
+    real data): the "Total Pts" on a given week's page is the standing
+    entering that week's game, already reflecting every prior week's
+    result, not a running total that still needs last week's result
+    folded in. Falls back to the most recent earlier week's posted total
+    when this week's own hasn't been posted yet (e.g. projecting a week
+    whose standings paste hasn't arrived) — a last-known approximation
+    that won't reflect any result since then, better than nothing.
     """
     week_row = conn.execute(
         "SELECT id FROM week WHERE season_year = ? AND week_number = ?",
@@ -281,14 +288,6 @@ def get_scenario_projection_data(
     if week_row is None:
         return ScenarioData(games=[], entries=[])
     week_id = week_row["id"]
-
-    prev_week_row = conn.execute(
-        """
-        SELECT id FROM week WHERE season_year = ? AND week_number < ?
-        ORDER BY week_number DESC LIMIT 1
-        """,
-        (season_year, week_number),
-    ).fetchone()
 
     assignments = conn.execute(
         """
@@ -315,15 +314,25 @@ def get_scenario_projection_data(
                 favorite=r["favorite"], margin=r["spread_margin"] or 0, outcome=r["outcome"],
             )
 
-        points = None
-        if prev_week_row is not None:
-            prev_row = conn.execute(
-                "SELECT points FROM entry_week_points WHERE entry_id = ? AND week_id = ?",
-                (r["entry_id"], prev_week_row["id"]),
-            ).fetchone()
-            points = prev_row["points"] if prev_row else None
+        this_week_row = conn.execute(
+            "SELECT points FROM entry_week_points WHERE entry_id = ? AND week_id = ?",
+            (r["entry_id"], week_id),
+        ).fetchone()
+        if this_week_row is not None:
+            points = this_week_row["points"]
         elif week_number == 1:
             points = config.start_points
+        else:
+            fallback_row = conn.execute(
+                """
+                SELECT ewp.points FROM entry_week_points ewp
+                JOIN week w ON w.id = ewp.week_id
+                WHERE ewp.entry_id = ? AND w.season_year = ? AND w.week_number < ?
+                ORDER BY w.week_number DESC LIMIT 1
+                """,
+                (r["entry_id"], season_year, week_number),
+            ).fetchone()
+            points = fallback_row["points"] if fallback_row else None
         if points is None:
             continue  # no known starting point for this entry — skip rather than guess
 

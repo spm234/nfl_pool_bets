@@ -195,6 +195,20 @@ def test_fetch_my_spreads_exits_nonzero_on_failure(db_path, monkeypatch):
     assert exc_info.value.code == 1
 
 
+def test_config_set_recommend_aggression(db_path):
+    args = Namespace(
+        db=str(db_path), start_points=None, min_bet=None, entry_fee=None, payouts=None,
+        upset_threshold=None, spread_source=None, counts_favorite_loss=None,
+        default_field_size=None, recommend_aggression=90,
+    )
+    cli.cmd_config_set(args)
+    from pool.config import PoolConfig
+    conn = db.connect(db_path)
+    cfg = PoolConfig.load(conn)
+    assert cfg.recommend_aggression == 90
+    conn.close()
+
+
 def test_sync_results_no_games_is_a_noop(db_path, capsys):
     args = Namespace(db=str(db_path), api_key="test-key", days_from=3)
     cli.cmd_sync_results(args)

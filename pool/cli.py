@@ -56,6 +56,8 @@ def cmd_config_set(args):
         cfg.upset_counts_favorite_loss = args.counts_favorite_loss == "yes"
     if args.default_field_size is not None:
         cfg.default_field_size = args.default_field_size
+    if args.recommend_aggression is not None:
+        cfg.recommend_aggression = args.recommend_aggression
     cfg.save(conn)
     print("Config updated.")
     conn.close()
@@ -552,8 +554,9 @@ def cmd_weekly(args):
         p_upset_freq=cfg.sim_p_upset_freq,
         p_upset_win=cfg.sim_p_upset_win,
     )
+    aggression = args.aggression if args.aggression is not None else cfg.recommend_aggression
     recs = build_weekly_recommendations(
-        entry_inputs, assumptions, cfg.payouts, cfg.entry_fee, aggression=args.aggression,
+        entry_inputs, assumptions, cfg.payouts, cfg.entry_fee, aggression=aggression,
         upset_threshold=cfg.upset_spread_threshold,
         upset_multiplier=cfg.upset_multiplier,
         counts_favorite_loss=cfg.upset_counts_favorite_loss,
@@ -583,6 +586,7 @@ def cmd_export_html(args):
         season=args.season,
         week=args.week,
         include_field_names=args.include_field_names,
+        aggression=args.aggression,
     )
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -613,6 +617,11 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--spread-source")
     sp.add_argument("--counts-favorite-loss", choices=["yes", "no"])
     sp.add_argument("--default-field-size", type=int)
+    sp.add_argument(
+        "--recommend-aggression", type=float,
+        help="Default stake aggression when a command doesn't pass --aggression "
+        "explicitly (0=10%% of Kelly .. 100=75%% of Kelly)",
+    )
     sp.set_defaults(func=cmd_config_set)
 
     for name, help_, fn in [
@@ -806,13 +815,21 @@ def build_parser() -> argparse.ArgumentParser:
         "(full field names/points are included by default — note this is public info about "
         "other pool members if the export is published somewhere public)",
     )
+    sp.add_argument(
+        "--aggression", type=float, default=None,
+        help="0=conservative .. 100=aggressive, for the My Entries recommendation slips "
+        "(defaults to config's recommend-aggression)",
+    )
     sp.set_defaults(func=cmd_export_html)
 
     sp = sub.add_parser("weekly", help="Weekly workflow: refresh lines, prompt, recommend")
     sp.add_argument("--season", type=int, required=True)
     sp.add_argument("--week", type=int, required=True)
     sp.add_argument("--api-key", default=None)
-    sp.add_argument("--aggression", type=float, default=50, help="0=conservative .. 100=aggressive")
+    sp.add_argument(
+        "--aggression", type=float, default=None,
+        help="0=conservative .. 100=aggressive (defaults to config's recommend-aggression)",
+    )
     sp.add_argument("--runs", type=int, default=1500)
     sp.set_defaults(func=cmd_weekly)
 

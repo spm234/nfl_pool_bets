@@ -35,6 +35,9 @@ class PoolConfig:
     sim_p_win: float = 0.50
     sim_p_upset_freq: float = 0.20
     sim_p_upset_win: float = 0.22
+    # Default --aggression for recommend.recommend_bet_size when a command
+    # doesn't pass one explicitly (0=10% of Kelly .. 100=75% of Kelly).
+    recommend_aggression: float = 50
 
     @classmethod
     def load(cls, conn: sqlite3.Connection) -> "PoolConfig":
@@ -58,6 +61,7 @@ class PoolConfig:
             sim_p_win=row["sim_p_win"],
             sim_p_upset_freq=row["sim_p_upset_freq"],
             sim_p_upset_win=row["sim_p_upset_win"],
+            recommend_aggression=row["recommend_aggression"],
         )
 
     def save(self, conn: sqlite3.Connection) -> None:
@@ -68,8 +72,8 @@ class PoolConfig:
                 upset_spread_threshold, upset_multiplier, tie_multiplier,
                 late_pick_default_bet, late_pick_default_side, late_pick_default_pick,
                 spread_source_name, upset_counts_favorite_loss, default_field_size,
-                sim_p_win, sim_p_upset_freq, sim_p_upset_win
-            ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                sim_p_win, sim_p_upset_freq, sim_p_upset_win, recommend_aggression
+            ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 start_points=excluded.start_points,
                 min_bet=excluded.min_bet,
@@ -86,7 +90,8 @@ class PoolConfig:
                 default_field_size=excluded.default_field_size,
                 sim_p_win=excluded.sim_p_win,
                 sim_p_upset_freq=excluded.sim_p_upset_freq,
-                sim_p_upset_win=excluded.sim_p_upset_win
+                sim_p_upset_win=excluded.sim_p_upset_win,
+                recommend_aggression=excluded.recommend_aggression
             """,
             (
                 self.start_points,
@@ -105,6 +110,7 @@ class PoolConfig:
                 self.sim_p_win,
                 self.sim_p_upset_freq,
                 self.sim_p_upset_win,
+                self.recommend_aggression,
             ),
         )
         conn.commit()

@@ -94,14 +94,20 @@ def recommend_bet_size(
     payout multiplier), not just a flat percentage — a 71%-likely pick and
     a 55%-likely pick should not get the same stake, and previously did.
 
-    aggression (0..100) scales how much of full Kelly to actually bet:
-    0 -> 10% of Kelly (very conservative), 100 -> 75% of Kelly. Never full
-    Kelly — that's theoretically optimal for long-run compounding growth
-    of a repeatedly-reinvested bankroll, not appropriate for a short,
-    finite, ranked tournament with a top-10 payout structure.
+    aggression (0..100) scales how much of full Kelly to actually bet: 0 ->
+    10% of Kelly (very conservative), 100 -> 200% of Kelly, i.e. DOUBLE full
+    Kelly. Full Kelly is theoretically optimal for long-run compounding
+    growth of a repeatedly-reinvested bankroll, which isn't this tool's
+    actual objective (a short, finite, ranked tournament with a top-10
+    payout structure) — a high-aggression setting deliberately allows
+    over-betting full Kelly for exactly that reason: on a strong enough
+    edge (e.g. a 70%+ win probability at even money), this can recommend
+    staking the entire current stack, not some Kelly-bounded fraction of
+    it. The stake is still hard-capped at the entry's current stack either
+    way — this can never recommend betting more than you have.
     """
     full_kelly = kelly_fraction(win_probability, multiplier)
-    kelly_scale = 0.10 + (0.75 - 0.10) * (aggression / 100)
+    kelly_scale = 0.10 + (2.00 - 0.10) * (aggression / 100)
     fraction = full_kelly * kelly_scale
     floor = min(min_bet, current_points)
     bet = max(floor, min(current_points, round(current_points * fraction / 10) * 10))
@@ -177,7 +183,8 @@ def build_weekly_recommendations(
             + (" — qualifying 10x upset." if choice.is_upset else ".")
             + f" Model win probability {choice.win_probability:.0%}; stake sized at "
             f"{size['fraction']*100:.0f}% of stack ({size['full_kelly']*100:.0f}% would be full "
-            f"Kelly at this edge, scaled down by the aggression setting). "
+            f"Kelly at this edge, scaled by the aggression setting — over 100% means this is "
+            f"deliberately betting past full Kelly). "
             f"{choice.pick} EV {choice.ev_per_point:+.2f}/pt vs {other_pick} "
             f"{choice.other_pick_ev_per_point:+.2f}/pt — compares linear point EV only, not full "
             f"tournament payout strategy."
