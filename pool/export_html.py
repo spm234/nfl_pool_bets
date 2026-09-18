@@ -355,7 +355,8 @@ def _field_size_and_weeks_remaining(conn, cfg, season, week):
 
 
 def _entry_sections(
-    conn: sqlite3.Connection, cfg: PoolConfig, season: Optional[int], week: Optional[int]
+    conn: sqlite3.Connection, cfg: PoolConfig, season: Optional[int], week: Optional[int],
+    aggression: float,
 ) -> tuple[str, dict]:
     """'My Entries' tab: game log + this week's pick, one block per entry.
     The Monte Carlo scenario comparison lives in its own Simulation tab
@@ -392,6 +393,7 @@ def _entry_sections(
                 )
                 rec = build_weekly_recommendations(
                     [entry_input], assumptions, cfg.payouts, cfg.entry_fee, seed=1,
+                    aggression=aggression,
                     upset_threshold=cfg.upset_spread_threshold,
                     upset_multiplier=cfg.upset_multiplier,
                     counts_favorite_loss=cfg.upset_counts_favorite_loss,
@@ -773,12 +775,14 @@ def render_report_html(
     season: Optional[int] = None,
     week: Optional[int] = None,
     include_field_names: bool = True,
+    aggression: Optional[float] = None,
 ) -> str:
     generated_at = datetime.now(timezone.utc).strftime("%b %d, %Y &middot; %H:%M UTC")
     week_label = f"Week {week}" if week else "No active week set"
     meta = f"Season {season} &middot; {week_label}" if season else week_label
+    aggression = aggression if aggression is not None else cfg.recommend_aggression
 
-    entry_blocks, timelines = _entry_sections(conn, cfg, season, week)
+    entry_blocks, timelines = _entry_sections(conn, cfg, season, week, aggression)
     scoreboard = _scoreboard_strip(timelines) if timelines else ""
     field_content = _field_summary_section(conn, cfg, season, week, include_field_names)
     projector_content = _scenario_projector_section(conn, cfg, season, week, include_field_names)

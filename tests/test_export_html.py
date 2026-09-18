@@ -69,6 +69,26 @@ def test_render_report_includes_my_entries_and_scenarios(conn):
     assert "Aggressive" in out
 
 
+def test_render_report_aggression_override_changes_recommended_stake(conn):
+    _seed(conn)
+    cfg = PoolConfig.load(conn)
+    conservative = render_report_html(conn, cfg, season=2026, week=1, aggression=0)
+    aggressive = render_report_html(conn, cfg, season=2026, week=1, aggression=100)
+    assert conservative != aggressive
+
+
+def test_render_report_defaults_to_configs_recommend_aggression(conn):
+    _seed(conn)
+    cfg = PoolConfig.load(conn)
+    cfg.recommend_aggression = 100
+    cfg.save(conn)
+    cfg = PoolConfig.load(conn)
+
+    default_via_config = render_report_html(conn, cfg, season=2026, week=1)
+    explicit_match = render_report_html(conn, cfg, season=2026, week=1, aggression=100)
+    assert default_via_config == explicit_match
+
+
 def test_render_report_escapes_html_in_names(conn):
     # Must have an assignment (not just standings) to actually appear in the
     # field reconstruction table — otherwise this test would pass trivially

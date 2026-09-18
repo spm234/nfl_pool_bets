@@ -25,6 +25,15 @@ def test_init_db_creates_default_config(conn):
     assert cfg.start_points == 150
     assert cfg.min_bet == 20
     assert cfg.payouts[0] == 40
+    assert cfg.recommend_aggression == 50
+
+
+def test_config_recommend_aggression_round_trips(conn):
+    cfg = PoolConfig.load(conn)
+    cfg.recommend_aggression = 85
+    cfg.save(conn)
+    reloaded = PoolConfig.load(conn)
+    assert reloaded.recommend_aggression == 85
 
 
 def test_import_standings_paste_shape(conn):
@@ -434,17 +443,32 @@ def test_scenario_projection_data_includes_real_declared_picks(conn):
     assert not_yet.declared_bet is None
 
 
-def test_scenario_projection_data_uses_prior_week_points(conn):
+def test_scenario_projection_data_uses_this_weeks_own_posted_points(conn):
     importer.import_week_csv(conn, 2026, 1, _SAMPLE_WEEK_CSV)
-    # Week 2: same entries, different (already-known) points entering week 2.
-    week2_csv = _SAMPLE_WEEK_CSV.replace("150", "180")
+    # Week 2's own page already reflects week 1's result (confirmed against
+    # the pool's real per-week export) -- e.g. SPM went 150 -> 270 off a
+    # correct week-1 pick.
+    week2_csv = _SAMPLE_WEEK_CSV.replace("SPM, 150", "SPM, 270")
     importer.import_week_csv(conn, 2026, 2, week2_csv)
 
     cfg = PoolConfig.load(conn)
     data = get_scenario_projection_data(conn, 2026, 2, cfg)
     spm = next(e for e in data.entries if e.name == "SPM")
-    # Entering week 2 should reflect week 1's posted points (150), not week 2's.
-    assert spm.points_entering_week == 150
+    # Entering week 2 should reflect week 2's own posted total, not week 1's.
+    assert spm.points_entering_week == 270
+
+
+def test_scenario_projection_data_falls_back_to_last_known_week(conn):
+    importer.import_week_csv(conn, 2026, 1, _SAMPLE_WEEK_CSV)
+    # Week 3's schedule/assignments exist (e.g. from the lookahead sheet)
+    # but week 3's own standings haven't been posted yet.
+    importer.import_schedule(conn, 2026, 3, "Dallas, NY Giants\n")
+    importer.import_assignments(conn, 2026, 3, "SPM, Dallas\n")
+
+    cfg = PoolConfig.load(conn)
+    data = get_scenario_projection_data(conn, 2026, 3, cfg)
+    spm = next(e for e in data.entries if e.name == "SPM")
+    assert spm.points_entering_week == 150  # falls back to week 1's last-known total
 
 
 def test_scenario_projection_data_no_week_returns_empty(conn):
