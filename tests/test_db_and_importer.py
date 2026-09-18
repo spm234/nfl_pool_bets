@@ -252,6 +252,69 @@ def test_import_week_csv_idempotent_on_rerun(conn):
     assert count["n"] == 1
 
 
+# --- infer_results_from_points (no-API-key fallback) ---
+
+def test_infer_results_from_points_resolves_decisive_outcome(conn):
+    importer.record_my_pick(conn, 2026, 1, "SPM", "Atlanta", "Pittsburgh", "away", "LOSS", 120)
+    summary = importer.infer_results_from_points(conn, 2026, 1)
+    # no points recorded yet for either week -- nothing to infer from
+    assert summary.resolved == 0
+    assert summary.conflicting_games == []
+
+    importer.import_standings(conn, 2026, 1, "SPM, 150\n")
+    importer.import_standings(conn, 2026, 2, "SPM, 270\n")
+    game = conn.execute("SELECT outcome FROM game WHERE away_team = 'Atlanta'").fetchone()
+    # import_standings(week 2, ...) already triggers inference for week 1 automatically
+    assert game["outcome"] == "home"
+
+
+def test_infer_results_from_points_never_overwrites_a_recorded_outcome(conn):
+    importer.record_my_pick(conn, 2026, 1, "SPM", "Atlanta", "Pittsburgh", "away", "LOSS", 120)
+    importer.record_game_result(conn, 2026, 1, "Atlanta", "Pittsburgh", outcome="away")
+    importer.import_standings(conn, 2026, 1, "SPM, 150\n")
+    importer.import_standings(conn, 2026, 2, "SPM, 270\n")
+    game = conn.execute("SELECT outcome FROM game WHERE away_team = 'Atlanta'").fetchone()
+    assert game["outcome"] == "away"  # the manually recorded result wins, not the (wrong) inference
+
+
+def test_infer_results_from_points_skips_entries_with_no_declared_pick(conn):
+    importer.import_week_csv(conn, 2026, 1, _SAMPLE_WEEK_CSV)  # no declared picks/bets
+    importer.import_week_csv(
+        conn, 2026, 2,
+        "Rank,Team Name,Total Pts,Away,Home\n1, 01 Sportsbet, 300, Cleveland, Jacksonville\n",
+    )
+    game = conn.execute("SELECT outcome FROM game WHERE away_team = 'Cleveland'").fetchone()
+    assert game["outcome"] is None
+
+
+def test_infer_results_from_points_flags_disagreeing_entries_as_conflict(conn):
+    importer.record_my_pick(conn, 2026, 1, "SPM", "Atlanta", "Pittsburgh", "away", "LOSS", 120)
+    importer.record_my_pick(conn, 2026, 1, "SPM 2", "Atlanta", "Pittsburgh", "home", "LOSS", 30)
+    importer.import_standings(conn, 2026, 1, "SPM, 150\nSPM 2, 150\n")
+    # SPM's delta implies Pittsburgh (home) won; SPM 2's delta implies Atlanta (away) did --
+    # contradictory data, e.g. a mis-typed point total.
+    importer.import_standings(conn, 2026, 2, "SPM, 270\nSPM 2, 180\n")
+
+    game = conn.execute("SELECT outcome FROM game WHERE away_team = 'Atlanta'").fetchone()
+    assert game["outcome"] is None  # left unresolved rather than guessed at
+
+    summary = importer.infer_results_from_points(conn, 2026, 1)
+    assert summary.resolved == 0
+    assert summary.conflicting_games == [("Atlanta", "Pittsburgh")]
+
+
+def test_cmd_infer_results_is_available_for_manual_reprocessing(conn):
+    importer.record_my_pick(conn, 2026, 1, "SPM 2", "Buffalo", "Houston", "away", "WIN", 50)
+    importer.import_standings(conn, 2026, 1, "SPM 2, 150\n")
+    importer.import_standings(conn, 2026, 2, "SPM 2, 200\n")
+    # already inferred automatically, but re-running by hand should be a safe no-op
+    summary_again = importer.infer_results_from_points(conn, 2026, 1)
+    assert summary_again.resolved == 0
+    assert summary_again.conflicting_games == []
+    game = conn.execute("SELECT outcome FROM game WHERE away_team = 'Buffalo'").fetchone()
+    assert game["outcome"] == "away"
+
+
 _SAMPLE_FIELD_PICKS_TSV = (
     "Rank\tTeam Name\tTotal Pts\tTeam 1\tWin / Lose\tTeam 2\tBet Amount\n"
     "1\t01 Sportsbet\t150\tCleveland\tLOSE\tJacksonville\t150\n"

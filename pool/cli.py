@@ -183,6 +183,30 @@ def cmd_calibrate_simulation(args):
     conn.close()
 
 
+def cmd_infer_results(args):
+    """Infers a week's game outcomes from the point deltas between it and
+    the following week's posted standings, for any entry with a declared
+    pick/bet — no Odds API / THE_ODDS_API_KEY needed, since the operator's
+    own posted totals already carry the result. import-standings and
+    import-week already do this automatically for the week right before
+    whatever week they just applied; this is for reprocessing a week by
+    hand (e.g. after declaring a late pick, or if THE_ODDS_API_KEY is
+    simply never going to be set up and results only ever arrive this way).
+    """
+    conn = db.connect(args.db)
+    summary = importer.infer_results_from_points(conn, args.season, args.week)
+    print(
+        f"Inferred {summary.resolved} game outcome(s) for week {args.week} "
+        f"from week {args.week + 1}'s posted points."
+    )
+    for away, home in summary.conflicting_games:
+        print(
+            f"  CONFLICT: {away} @ {home} — different entries' declared picks imply different "
+            "outcomes (likely a bad point total or stale pick somewhere) — left unresolved."
+        )
+    conn.close()
+
+
 def cmd_record_result(args):
     conn = db.connect(args.db)
     # Only pass fields that were actually given, so e.g. recording the
@@ -655,6 +679,16 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--moneyline-sheet", default=None, help="Moneyline lookahead sheet ID or URL")
     sp.add_argument("--moneyline-file", default=None, help="Local moneyline CSV instead of --moneyline-sheet")
     sp.set_defaults(func=cmd_calibrate_simulation)
+
+    sp = sub.add_parser(
+        "infer-results",
+        help="Infer a week's game outcomes from point deltas vs. the following week's posted "
+        "standings — no Odds API needed (import-standings/import-week already do this "
+        "automatically; use this to reprocess a week by hand).",
+    )
+    sp.add_argument("--season", type=int, required=True)
+    sp.add_argument("--week", type=int, required=True)
+    sp.set_defaults(func=cmd_infer_results)
 
     sp = sub.add_parser("record-result", help="Record a game's spread and/or outcome")
     sp.add_argument("--season", type=int, required=True)

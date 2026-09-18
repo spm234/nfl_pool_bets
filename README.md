@@ -241,6 +241,52 @@ lands on `main` (or whatever the default branch is) — `workflow_dispatch`
 (Actions tab → "Sync results" → "Run workflow") works from any branch in
 the meantime.
 
+### Results without the Odds API at all (`infer-results`)
+
+Assume `THE_ODDS_API_KEY` may simply never get set up — that's a real gap,
+not a hypothetical, since it depends on signing up for a free-tier key and
+wiring it into a repo secret. `fetch-results`/`sync-results` above both stop
+working entirely without it. But there's a second, independent source of
+truth for results that's always available: the operator's own posted
+standings. If an entry's declared pick/bet for a game is known (`SPM`/`SPM
+2`/`SPM 3`'s own picks, or any field entry imported via
+`import-week-picks`), then that entry's own point delta between two
+consecutive weeks' posted totals tells you exactly whether their pick won
+or lost — which, combined with which side they picked, tells you the
+game's actual outcome. No score, no API call, just arithmetic on numbers
+you already pasted in.
+
+`import-standings` and `import-week` both run this automatically —
+whenever you paste in a new week's totals, the *previous* week's game
+outcomes that are now revealed by the point deltas get inferred and
+recorded, for free. `infer-results` is the same thing exposed directly, for
+reprocessing a week by hand:
+
+```
+python -m pool.cli infer-results --season 2026 --week 1
+```
+
+This never overwrites a game that already has a real recorded outcome
+(fetched, manually recorded, or already inferred) — a real result always
+wins. And where two different entries' own picks imply *different*
+outcomes for the same game (a mis-typed point total or a stale pick
+somewhere), it reports that game as a conflict and leaves it unresolved
+rather than guessing:
+
+```
+Inferred 14 game outcome(s) for week 1 from week 2's posted points.
+  CONFLICT: Atlanta @ Pittsburgh — different entries' declared picks imply different
+  outcomes (likely a bad point total or stale pick somewhere) — left unresolved.
+```
+
+One real caveat, same one `fetch-result` documents for the API path: a
+game that was actually tied at the end of regulation (any WIN/LOSS pick
+loses on that, by the pool's rule) is indistinguishable, from one entry's
+point delta alone, from that entry simply having picked the losing side —
+both score identically for them. Regulation ties are rare enough that this
+is an acceptable fallback, not a substitute for a real recorded result
+once one becomes available.
+
 ## Future weeks: lookahead spreads and simulation calibration
 
 The Odds API only carries real lines for the upcoming week or two — sportsbooks

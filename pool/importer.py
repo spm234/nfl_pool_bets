@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 from . import db, nfl_teams
+from .scoring import infer_outcome_from_points
 
 
 def _split_line(line: str) -> List[str]:
@@ -48,7 +49,14 @@ def parse_standings_paste(text: str) -> List[Tuple[str, float]]:
 def import_standings(
     conn: sqlite3.Connection, season_year: int, week_number: int, text: str
 ) -> int:
-    """Applies a standings paste for a week. Returns count of rows applied."""
+    """Applies a standings paste for a week. Returns count of rows applied.
+
+    Also opportunistically infers the PREVIOUS week's game outcomes from
+    the point deltas this reveals (see infer_results_from_points) — this
+    posted-totals paste is itself a real result source, so results keep
+    flowing even if fetch-results/fetch-result (the Odds API path) was
+    never run.
+    """
     week_id = db.get_or_create_week(conn, season_year, week_number)
     count = 0
     for name, points in parse_standings_paste(text):
@@ -63,6 +71,8 @@ def import_standings(
         )
         count += 1
     conn.commit()
+    if week_number > 1:
+        infer_results_from_points(conn, season_year, week_number - 1)
     return count
 
 
@@ -100,6 +110,12 @@ def import_week_csv(
     this pool actually works: every entry is nominally assigned the away
     team, and picking WIN/LOSS/TIE for that team is how you bet the game
     either way (there's no separate "pick the home team instead").
+
+    Also opportunistically infers the PREVIOUS week's game outcomes from
+    the point deltas this reveals (see infer_results_from_points) — the
+    pool's own weekly export is itself a real result source, so results
+    keep flowing even if fetch-results/fetch-result (the Odds API path)
+    was never run.
     """
     import csv
     import io
@@ -138,6 +154,8 @@ def import_week_csv(
         count += 1
 
     conn.commit()
+    if week_number > 1:
+        infer_results_from_points(conn, season_year, week_number - 1)
     return count
 
 
@@ -230,6 +248,98 @@ def record_game_result(
     )
     conn.commit()
     return game_id
+
+
+@dataclass
+class ResultInferenceSummary:
+    resolved: int
+    # Games where two entries' own declared pick/bet + posted-points delta
+    # implied DIFFERENT outcomes for the same game — a data-entry error
+    # somewhere (a typo'd point total, a stale pick) rather than something
+    # this can safely guess between. Left unresolved rather than picking
+    # one side arbitrarily; away_team/home_team pairs, for surfacing to
+    # the caller.
+    conflicting_games: List[Tuple[str, str]]
+
+
+def infer_results_from_points(
+    conn: sqlite3.Connection, season_year: int, week_number: int
+) -> ResultInferenceSummary:
+    """Infers and records game.outcome for `week_number`'s games from the
+    point delta between `week_number` and `week_number + 1`'s posted
+    standings, for every assignment with a declared pick/bet that week —
+    see scoring.infer_outcome_from_points for the method and its one
+    caveat (regulation ties). This is what keeps results flowing into the
+    tool even when fetch-results/fetch-result (the Odds API path) was
+    never run, or THE_ODDS_API_KEY was never configured at all: the
+    operator's own posted totals already carry the result, this just reads
+    it back out instead of depending on a second source that may never be
+    available. Never overwrites a game that already has a recorded
+    outcome (fetched, manually recorded, or already inferred) — a real
+    recorded result always wins.
+
+    Every entry assigned to a game is its own independent witness to the
+    same real-world result, so before writing anything this cross-checks
+    all of them: a game only gets resolved when every entry that reveals
+    an outcome agrees. A game where they disagree is reported in
+    `conflicting_games` and left unresolved rather than guessed at.
+    """
+    week_row = conn.execute(
+        "SELECT id FROM week WHERE season_year = ? AND week_number = ?",
+        (season_year, week_number),
+    ).fetchone()
+    next_week_row = conn.execute(
+        "SELECT id FROM week WHERE season_year = ? AND week_number = ?",
+        (season_year, week_number + 1),
+    ).fetchone()
+    if week_row is None or next_week_row is None:
+        return ResultInferenceSummary(resolved=0, conflicting_games=[])
+    week_id, next_week_id = week_row["id"], next_week_row["id"]
+
+    rows = conn.execute(
+        """
+        SELECT a.assigned_side, g.away_team, g.home_team, g.outcome,
+               wo.declared_pick, wo.declared_bet,
+               p0.points AS points_before, p1.points AS points_after
+        FROM assignment a
+        JOIN game g ON g.id = a.game_id
+        LEFT JOIN wager_observation wo ON wo.assignment_id = a.id
+        LEFT JOIN entry_week_points p0 ON p0.entry_id = a.entry_id AND p0.week_id = ?
+        LEFT JOIN entry_week_points p1 ON p1.entry_id = a.entry_id AND p1.week_id = ?
+        WHERE g.week_id = ?
+        """,
+        (week_id, next_week_id, week_id),
+    ).fetchall()
+
+    inferred_by_game: dict = {}  # (away, home) -> {outcome, ...}
+    already_resolved = set()
+    for r in rows:
+        key = (r["away_team"], r["home_team"])
+        if r["outcome"] is not None:
+            already_resolved.add(key)
+            continue
+        if r["declared_pick"] is None or r["declared_bet"] is None:
+            continue
+        if r["points_before"] is None or r["points_after"] is None:
+            continue
+        outcome = infer_outcome_from_points(
+            r["assigned_side"], r["declared_pick"], r["points_before"], r["points_after"]
+        )
+        if outcome is None:
+            continue
+        inferred_by_game.setdefault(key, set()).add(outcome)
+
+    resolved = 0
+    conflicting_games: List[Tuple[str, str]] = []
+    for (away, home), outcomes in inferred_by_game.items():
+        if (away, home) in already_resolved:
+            continue
+        if len(outcomes) > 1:
+            conflicting_games.append((away, home))
+            continue
+        record_game_result(conn, season_year, week_number, away, home, outcome=next(iter(outcomes)))
+        resolved += 1
+    return ResultInferenceSummary(resolved=resolved, conflicting_games=conflicting_games)
 
 
 _FIELD_PICK_MAP = {"WIN": "WIN", "LOSE": "LOSS", "LOSS": "LOSS", "TIE": "TIE"}
