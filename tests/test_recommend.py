@@ -45,10 +45,25 @@ def test_recommend_bet_size_no_edge_floors_at_min_bet():
     assert no_edge["bet"] == 20  # floored at min_bet even with zero Kelly edge
 
 
-def test_recommend_bet_size_never_exceeds_full_kelly():
-    for aggression in (0, 50, 100):
-        size = recommend_bet_size(150, min_bet=20, win_probability=0.71, multiplier=1.0, aggression=aggression)
-        assert size["fraction"] <= size["full_kelly"]
+def test_recommend_bet_size_low_aggression_stays_under_full_kelly():
+    size = recommend_bet_size(150, min_bet=20, win_probability=0.71, multiplier=1.0, aggression=0)
+    assert size["fraction"] <= size["full_kelly"]
+
+
+def test_recommend_bet_size_high_aggression_can_exceed_full_kelly():
+    # aggression=100 -> 200% of full Kelly: a strong enough edge (a 71%
+    # win probability at even money) deliberately bets PAST full Kelly,
+    # not capped at it -- that's the whole point of a high aggression
+    # setting for a finite tournament rather than a compounding bankroll.
+    size = recommend_bet_size(300, min_bet=20, win_probability=0.71, multiplier=1.0, aggression=100)
+    assert size["fraction"] > size["full_kelly"]
+
+
+def test_recommend_bet_size_very_high_win_probability_bets_the_whole_stack():
+    # aggression=100, mult=1: fraction = full_kelly * 2.0 -- a 75%+ win
+    # probability pushes past 1.0, which the stack cap then clips to 100%.
+    size = recommend_bet_size(270, min_bet=20, win_probability=0.75, multiplier=1.0, aggression=100)
+    assert size["bet"] == 270
 
 
 def test_recommend_bet_size_aggression_scales_within_kelly():

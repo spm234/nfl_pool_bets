@@ -609,11 +609,26 @@ favorite, neither a qualifying upset) got the exact same stake, because
 sizing only looked at the upset/non-upset switch, not the underlying win
 probability. Now the bigger, more confident edge gets a bigger stake.
 
-The `--aggression` setting (0-100) scales how much of *full* Kelly is
-actually bet: 0 → 10% of Kelly, 100 → 75% of Kelly. Full Kelly is never
-used outright — it's theoretically optimal for long-run compounding growth
-of a repeatedly-reinvested bankroll, not for a short, finite, ranked
-tournament with a top-10 payout structure.
+The `--aggression` setting (0-100, config-backed as `recommend_aggression` —
+see `config-set --recommend-aggression`, used whenever a command doesn't
+pass `--aggression` explicitly) scales how much of *full* Kelly is actually
+bet: 0 → 10% of Kelly, 100 → **200%** of Kelly — i.e. double full Kelly, not
+capped at it. This deliberately allows betting past full Kelly at high
+aggression: full Kelly is theoretically optimal for long-run compounding
+growth of a repeatedly-reinvested bankroll, which isn't this tool's actual
+objective (a short, finite, ranked tournament with a top-10 payout
+structure) — on a strong enough edge (roughly 70%+ win probability at even
+money) a high aggression setting can recommend staking the *entire* current
+stack, not some Kelly-bounded fraction of it. The stake is always
+hard-capped at the entry's current stack either way (see
+`recommend_bet_size`'s docstring) — this can never suggest betting more
+than you have.
+
+**This raises the default (aggression 50) noticeably too, not just the
+ceiling** — 50 now means ~105% of Kelly (was ~42.5%). If that's more than
+you want as your everyday default, dial `recommend_aggression` down
+(`config-set --recommend-aggression 25`, say) and reserve higher settings
+for `--aggression` overrides on specific high-conviction weeks.
 
 This same real win probability and multiplier also feed the Monte Carlo
 simulation for the *immediate* week only (`simulation.EntryPolicy`'s
@@ -624,8 +639,8 @@ weekly output now actually improve for a more confident pick, not just the
 stake size:
 
 ```
-SPM   — spread 5.5 (71% win prob):  bet 30, expected payout $54.85
-SPM 2 — spread -1.5 (56% win prob): bet 20, expected payout $28.41
+SPM   — spread 5.5 (71% win prob):  bet 70  at aggression 50, bet 130 at aggression 100
+SPM 2 — spread -1.5 (56% win prob): bet 20  at aggression 50, bet 40  at aggression 100
 ```
 
 ## What's deliberately thin
