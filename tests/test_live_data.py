@@ -61,6 +61,44 @@ def test_fetch_spread_estimate_home_favored(monkeypatch):
     assert est.margin == 3.5
 
 
+def test_fetch_spread_estimate_matches_real_api_full_team_names(monkeypatch):
+    # The Odds API actually reports full mascot names ("Seattle Seahawks"),
+    # not this project's short city names ("Seattle") -- the caller always
+    # passes short names (matching the DB), so matching has to translate.
+    fake_requests = types.SimpleNamespace()
+
+    def fake_get(url, params=None, timeout=None):
+        return _FakeResponse(
+            [
+                {
+                    "away_team": "Seattle Seahawks",
+                    "home_team": "Washington Commanders",
+                    "bookmakers": [
+                        {
+                            "markets": [
+                                {
+                                    "key": "spreads",
+                                    "outcomes": [
+                                        {"name": "Washington Commanders", "point": -2.5},
+                                        {"name": "Seattle Seahawks", "point": 2.5},
+                                    ],
+                                }
+                            ]
+                        }
+                    ],
+                }
+            ]
+        )
+
+    fake_requests.get = fake_get
+    fake_requests.RequestException = Exception
+    monkeypatch.setitem(sys.modules, "requests", fake_requests)
+
+    est = live_data.fetch_spread_estimate("Seattle", "Washington", api_key="test-key")
+    assert est.favorite == "home"
+    assert est.margin == 2.5
+
+
 def test_fetch_spread_estimate_no_key_raises(monkeypatch):
     monkeypatch.delenv("THE_ODDS_API_KEY", raising=False)
     fake_requests = types.SimpleNamespace(get=lambda *a, **k: None, RequestException=Exception)
@@ -174,6 +212,30 @@ def test_fetch_completed_score_tie(monkeypatch):
     )
     result = live_data.fetch_completed_score("Atlanta", "Pittsburgh", api_key="test-key")
     assert result.outcome == "tie"
+
+
+def test_fetch_completed_score_matches_real_api_full_team_names(monkeypatch):
+    monkeypatch.setitem(
+        sys.modules,
+        "requests",
+        _fake_scores_requests(
+            [
+                {
+                    "away_team": "Seattle Seahawks",
+                    "home_team": "Washington Commanders",
+                    "completed": True,
+                    "scores": [
+                        {"name": "Seattle Seahawks", "score": "31"},
+                        {"name": "Washington Commanders", "score": "17"},
+                    ],
+                }
+            ]
+        ),
+    )
+    result = live_data.fetch_completed_score("Seattle", "Washington", api_key="test-key")
+    assert result.outcome == "away"
+    assert result.away_score == 31
+    assert result.home_score == 17
 
 
 def test_fetch_completed_score_not_completed_raises(monkeypatch):

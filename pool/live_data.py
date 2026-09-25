@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from . import db
+from . import db, nfl_teams
 
 ODDS_API_BASE = "https://api.the-odds-api.com/v4/sports/americanfootball_nfl/odds"
 SCORES_API_BASE = "https://api.the-odds-api.com/v4/sports/americanfootball_nfl/scores"
@@ -64,6 +64,20 @@ class LiveDataError(Exception):
 
 def _normalize(name: str) -> str:
     return name.strip().lower()
+
+
+def _to_short_name(name: str) -> str:
+    """The Odds API reports full mascot names ("Seattle Seahawks"); this
+    project's own DB (and everything the caller passes in) uses the pool's
+    short city names ("Seattle") throughout — see nfl_teams.py. Translate
+    an API name down to the short form before comparing, so matching
+    actually works instead of comparing "seattle seahawks" to "seattle"
+    and finding nothing. Falls back to the name as-is if it's not a
+    recognized full name (e.g. it's already short, or a future league
+    rename this table doesn't know about yet), so this never raises on an
+    unrecognized name — it just won't match, same as before this fix.
+    """
+    return nfl_teams.FULL_TO_SHORT.get(name, name)
 
 
 def fetch_spread_estimate(
@@ -109,8 +123,8 @@ def fetch_spread_estimate(
     away_n, home_n = _normalize(away_team), _normalize(home_team)
     match = None
     for event in events:
-        if _normalize(event.get("away_team", "")) == away_n and _normalize(
-            event.get("home_team", "")
+        if _normalize(_to_short_name(event.get("away_team", ""))) == away_n and _normalize(
+            _to_short_name(event.get("home_team", ""))
         ) == home_n:
             match = event
             break
@@ -127,7 +141,7 @@ def fetch_spread_estimate(
             if market.get("key") != "spreads":
                 continue
             for outcome in market.get("outcomes", []):
-                if _normalize(outcome.get("name", "")) == home_n:
+                if _normalize(_to_short_name(outcome.get("name", ""))) == home_n:
                     home_margins.append(float(outcome["point"]))
 
     if not home_margins:
@@ -195,8 +209,8 @@ def fetch_completed_score(
     away_n, home_n = _normalize(away_team), _normalize(home_team)
     match = None
     for event in events:
-        if _normalize(event.get("away_team", "")) == away_n and _normalize(
-            event.get("home_team", "")
+        if _normalize(_to_short_name(event.get("away_team", ""))) == away_n and _normalize(
+            _to_short_name(event.get("home_team", ""))
         ) == home_n:
             match = event
             break
@@ -208,7 +222,9 @@ def fetch_completed_score(
     if not match.get("completed"):
         raise LiveDataError(f"{away_team} @ {home_team} is not marked completed yet.")
 
-    scores = {_normalize(s["name"]): int(s["score"]) for s in match.get("scores") or []}
+    scores = {
+        _normalize(_to_short_name(s["name"])): int(s["score"]) for s in match.get("scores") or []
+    }
     if away_n not in scores or home_n not in scores:
         raise LiveDataError(
             f"Game marked completed but score data is incomplete for {away_team} @ {home_team}."
