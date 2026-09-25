@@ -589,13 +589,23 @@ python -m loser_pool.cli sheet-ownership --file loser_pool_sheet.csv --period "W
 
 `recommend.choose_pick` (`pool/recommend.py`) compares betting WIN vs LOSS
 on your assigned team and recommends whichever has higher expected value —
-it does not default to WIN. Win probability comes from a logistic model
-driven by the recorded spread (`scoring.win_prob_from_spread`, ported from
-the original prototype but previously unused anywhere). This matters
-because a favorite betting LOSS against a qualifying spread pays the same
-10x upset bonus as an underdog betting WIN (confirmed rule, see above) —
-sometimes fading your own team is the better play, and the tool will now
-actually say so.
+it does not default to WIN. Win probability prefers the market's own
+moneyline when it's available (`team_moneyline`/`opponent_moneyline` —
+each side's own line run through `scoring.moneyline_to_win_probability`
+independently, since real two-way lines both carry the book's vig and
+don't sum to exactly 100%) — a moneyline is a more direct, market-priced
+win probability than a spread run through a generic curve. Falls back to
+the spread-driven logistic model (`scoring.win_prob_from_spread`) when a
+moneyline isn't available yet (e.g. a future week with only a projected
+spread). Either way, upset qualification (the 10x bonus threshold) is
+always defined by the spread — that's the pool's own rule, not a function
+of which probability source is active. This matters because a favorite
+betting LOSS against a qualifying spread pays the same 10x upset bonus as
+an underdog betting WIN (confirmed rule, see above) — sometimes fading
+your own team is the better play, and the tool will now actually say so.
+`fetch-my-spreads`/`fetch-my-moneylines` (or the "Fetch spreads" Action,
+which runs both) populate both per game — `weekly` and `export-html` use
+whichever moneyline is on file for each entry's assigned game.
 
 This compares linear expected points only — it does not account for how
 variance interacts with the pool's top-10 payout structure (a long-shot

@@ -532,7 +532,8 @@ def cmd_weekly(args):
         assignment = conn.execute(
             """
             SELECT a.id AS assignment_id, g.id AS game_id, g.away_team, g.home_team,
-                   g.favorite, g.spread_margin, a.assigned_side
+                   g.favorite, g.spread_margin, g.away_moneyline, g.home_moneyline,
+                   a.assigned_side
             FROM assignment a
             JOIN game g ON g.id = a.game_id
             WHERE a.entry_id = ? AND g.week_id = (
@@ -552,9 +553,11 @@ def cmd_weekly(args):
             db.get_or_create_assignment(conn, entry_id, game_id, side)
             conn.commit()
             favorite, margin = None, 0
+            away_moneyline, home_moneyline = None, None
         else:
             away, home, side = assignment["away_team"], assignment["home_team"], assignment["assigned_side"]
             favorite, margin = assignment["favorite"], assignment["spread_margin"]
+            away_moneyline, home_moneyline = assignment["away_moneyline"], assignment["home_moneyline"]
 
         if favorite is None and margin == 0:
             try:
@@ -577,9 +580,25 @@ def cmd_weekly(args):
                     if len(parts) == 2:
                         favorite, margin = parts[0], float(parts[1])
 
+        if away_moneyline is None or home_moneyline is None:
+            try:
+                ml_estimate = live_data.fetch_moneyline_estimate(away, home, api_key=args.api_key)
+                print(
+                    f"  {name}: fetched moneyline {away} {ml_estimate.away_moneyline:+d} @ "
+                    f"{home} {ml_estimate.home_moneyline:+d} [{ml_estimate.source}]"
+                )
+                live_data.save_moneyline_snapshot(conn, args.season, args.week, away, home, ml_estimate)
+                away_moneyline, home_moneyline = ml_estimate.away_moneyline, ml_estimate.home_moneyline
+            except live_data.LiveDataError as e:
+                print(f"  {name}: could not fetch a live moneyline ({e}) — falling back to spread-derived odds")
+
         timeline = compute_my_entry_timeline(conn, entry_id, cfg)
         current_points = timeline.current_points
         spread = margin if favorite != side else -margin
+        team_moneyline, opponent_moneyline = None, None
+        if away_moneyline is not None and home_moneyline is not None:
+            team_moneyline = away_moneyline if side == "away" else home_moneyline
+            opponent_moneyline = home_moneyline if side == "away" else away_moneyline
         entry_inputs.append(
             {
                 "name": name,
@@ -588,6 +607,8 @@ def cmd_weekly(args):
                 "home": home,
                 "side": side,
                 "spread": spread,
+                "team_moneyline": team_moneyline,
+                "opponent_moneyline": opponent_moneyline,
             }
         )
 

@@ -272,7 +272,8 @@ def _log_table(tl) -> str:
 def _entry_assignment(conn, entry_id, season, week):
     return conn.execute(
         """
-        SELECT g.away_team, g.home_team, g.favorite, g.spread_margin, a.assigned_side
+        SELECT g.away_team, g.home_team, g.favorite, g.spread_margin,
+               g.away_moneyline, g.home_moneyline, a.assigned_side
         FROM assignment a JOIN game g ON g.id = a.game_id
         WHERE a.entry_id = ? AND g.week_id = (
             SELECT id FROM week WHERE season_year = ? AND week_number = ?
@@ -381,10 +382,16 @@ def _entry_sections(
                 side = assignment["assigned_side"]
                 favorite, margin = assignment["favorite"], assignment["spread_margin"] or 0
                 spread = margin if favorite != side else -margin
+                away_ml, home_ml = assignment["away_moneyline"], assignment["home_moneyline"]
+                team_moneyline, opponent_moneyline = None, None
+                if away_ml is not None and home_ml is not None:
+                    team_moneyline = away_ml if side == "away" else home_ml
+                    opponent_moneyline = home_ml if side == "away" else away_ml
                 entry_input = {
                     "name": e["display_name"], "current_points": tl.current_points,
                     "away": assignment["away_team"], "home": assignment["home_team"],
                     "side": side, "spread": spread,
+                    "team_moneyline": team_moneyline, "opponent_moneyline": opponent_moneyline,
                 }
                 assumptions = SimAssumptions(
                     weeks_remaining=weeks_remaining, field_size=field_size, runs=1500,

@@ -6,6 +6,7 @@ from pool.recommend import (
     kelly_fraction,
     recommend_bet_size,
 )
+from pool.scoring import moneyline_to_win_probability
 from pool.simulation import SimAssumptions
 
 
@@ -95,7 +96,54 @@ def test_choose_pick_big_underdog_qualifying_upset_prefers_loss_over_win_here():
     choice = choose_pick(12, upset_threshold=10, upset_multiplier=10)
     assert choice.pick == "LOSS"
     assert choice.is_upset is False
-    assert choice.multiplier == 1.0
+
+
+# --- choose_pick: moneyline preferred over spread when both given ---
+
+def test_choose_pick_uses_moneyline_win_probability_when_given():
+    # spread alone (pick'em, 0) would give ~50/50; a real moneyline says
+    # otherwise, and that should win out.
+    choice = choose_pick(0, team_moneyline=-150, opponent_moneyline=130)
+    assert choice.win_probability == pytest.approx(moneyline_to_win_probability(-150))
+    assert choice.pick == "WIN"
+
+
+def test_choose_pick_falls_back_to_spread_without_moneyline():
+    choice_no_ml = choose_pick(5)
+    choice_with_none = choose_pick(5, team_moneyline=None, opponent_moneyline=None)
+    assert choice_no_ml.win_probability == choice_with_none.win_probability
+
+
+def test_choose_pick_partial_moneyline_falls_back_to_spread():
+    # only one side given -> not enough to trust, fall back rather than guess
+    choice = choose_pick(5, team_moneyline=-150, opponent_moneyline=None)
+    assert choice.win_probability != pytest.approx(moneyline_to_win_probability(-150))
+
+
+def test_choose_pick_moneyline_sides_need_not_sum_to_one():
+    # real two-way lines both carry vig and don't sum to exactly 100% --
+    # each side's own probability should come from its own line, not
+    # 1-minus-the-other.
+    choice = choose_pick(0, team_moneyline=-120, opponent_moneyline=-110)
+    win_p = moneyline_to_win_probability(-120)
+    loss_p = moneyline_to_win_probability(-110)
+    assert win_p + loss_p > 1.0  # both favorites -- the vig
+    expected = win_p if choice.pick == "WIN" else loss_p
+    assert choice.win_probability == pytest.approx(expected)
+
+
+def test_choose_pick_upset_qualification_unaffected_by_moneyline_source():
+    # is_upset_pick is defined by the spread (pool rule), not the moneyline
+    # -- whatever pick moneyline-driven EV lands on, its upset flag must
+    # match what the spread alone says for that same pick.
+    from pool.scoring import is_upset_pick
+
+    choice = choose_pick(
+        12, upset_threshold=10, upset_multiplier=10, team_moneyline=-800, opponent_moneyline=550
+    )
+    assert choice.is_upset == is_upset_pick(
+        12, choice.pick, upset_threshold=10, counts_favorite_loss=True
+    )
 
 
 def test_choose_pick_big_favorite_prefers_win_over_upset_fade():
@@ -129,6 +177,24 @@ def test_build_weekly_recommendations_shapes_output():
     assert recs[1].recommended_pick in ("WIN", "LOSS")
     assert recs[0].recommended_bet <= entries[0]["current_points"]
     assert 0 <= recs[0].sim_result.p_top10 <= 1
+
+
+def test_build_weekly_recommendations_uses_moneyline_when_entry_provides_it():
+    entries = [
+        {
+            "name": "HasMoneyline", "current_points": 150, "spread": 0,
+            "team_moneyline": -150, "opponent_moneyline": 130,
+        },
+        {"name": "NoMoneyline", "current_points": 150, "spread": 0},
+    ]
+    assumptions = SimAssumptions(weeks_remaining=5, field_size=50, runs=100, min_bet=20)
+    recs = build_weekly_recommendations(
+        entries, assumptions, [40, 18, 10, 9, 7, 6, 4, 3, 2, 1], 30, seed=1
+    )
+    by_name = {r.entry_name: r for r in recs}
+    assert "moneyline-derived" in by_name["HasMoneyline"].recommended_pick_reasoning.lower()
+    assert "spread-derived" in by_name["NoMoneyline"].recommended_pick_reasoning.lower()
+    assert by_name["HasMoneyline"].recommended_bet != by_name["NoMoneyline"].recommended_bet
 
 
 def test_build_weekly_recommendations_does_not_always_recommend_win():

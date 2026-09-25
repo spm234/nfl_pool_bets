@@ -89,6 +89,17 @@ def test_render_report_defaults_to_configs_recommend_aggression(conn):
     assert default_via_config == explicit_match
 
 
+def test_render_report_uses_moneyline_when_game_has_one(conn):
+    _seed(conn)
+    from pool import live_data
+
+    est = live_data.MoneylineEstimate(150, -180, "The Odds API, median of 3 books", "2026-09-09T00:00:00+00:00")
+    live_data.save_moneyline_snapshot(conn, 2026, 1, "Atlanta", "Pittsburgh", est)
+    cfg = PoolConfig.load(conn)
+    out = render_report_html(conn, cfg, season=2026, week=1)
+    assert "moneyline-derived" in out.lower()
+
+
 def test_render_report_escapes_html_in_names(conn):
     # Must have an assignment (not just standings) to actually appear in the
     # field reconstruction table — otherwise this test would pass trivially

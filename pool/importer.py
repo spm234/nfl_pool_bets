@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
 from . import db, nfl_teams
-from .scoring import infer_outcome_from_points
+from .scoring import infer_outcome_from_points, moneyline_to_win_probability
 
 
 def _split_line(line: str) -> List[str]:
@@ -590,16 +590,6 @@ def import_lookahead_spreads(conn: sqlite3.Connection, season_year: int, csv_tex
         count += 1
     conn.commit()
     return count
-
-
-def moneyline_to_win_probability(moneyline: float) -> float:
-    """American moneyline odds -> implied win probability (includes the
-    book's vig, so this slightly overstates true probability on both sides
-    of a game — a modeling approximation, not a precise figure).
-    """
-    if moneyline < 0:
-        return -moneyline / (-moneyline + 100)
-    return 100 / (moneyline + 100)
 
 
 @dataclass

@@ -7,7 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Optional
 
-from .scoring import Pick, is_upset_pick, win_prob_from_spread
+from .scoring import Pick, is_upset_pick, moneyline_to_win_probability, win_prob_from_spread
 from .simulation import EntryPolicy, SimAssumptions, SimResult, run_simulation
 
 
@@ -27,12 +27,28 @@ def choose_pick(
     upset_threshold: float = 10.0,
     upset_multiplier: float = 10.0,
     counts_favorite_loss: bool = True,
+    team_moneyline: Optional[float] = None,
+    opponent_moneyline: Optional[float] = None,
 ) -> PickChoice:
     """Compares betting WIN vs LOSS on the assigned team and returns
     whichever has higher expected value per point wagered — it does not
-    default to WIN. Win probability comes from a logistic model driven by
-    the spread (scoring.win_prob_from_spread): a model assumption, not a
-    guarantee, same as the rest of the simulator.
+    default to WIN.
+
+    Win probability prefers the market's own moneyline when both
+    `team_moneyline` and `opponent_moneyline` are given (the assigned
+    team's own line, and its opponent's) — a sportsbook's moneyline is a
+    more direct, market-priced win probability than a spread run through a
+    generic logistic curve, and each side's own line is used independently
+    (scoring.moneyline_to_win_probability per side) rather than assuming
+    one is exactly 1 minus the other, since real two-way lines both carry
+    the book's vig and don't sum to exactly 100%. Falls back to the
+    spread-driven logistic model (scoring.win_prob_from_spread) when a
+    moneyline isn't available (e.g. a future week with only a projected
+    spread) — a model assumption either way, not a guarantee.
+
+    Upset qualification (is_upset_pick) always uses the spread regardless
+    of which probability source is active — that's the pool's own rule
+    (a 10+ point spread), not a function of the moneyline.
 
     This compares linear expected points only. It does NOT account for how
     variance interacts with the pool's top-10 payout structure — a
@@ -45,9 +61,14 @@ def choose_pick(
     TIE is deliberately excluded from the comparison: real NFL games end
     in a regulation tie so rarely that betting TIE straight up is almost
     never defensible, even at 10x, and there's no principled way to
-    estimate its probability from a spread.
+    estimate its probability from a spread or moneyline.
     """
-    p_team_win = win_prob_from_spread(spread)
+    if team_moneyline is not None and opponent_moneyline is not None:
+        p_team_win = moneyline_to_win_probability(team_moneyline)
+        p_team_loss = moneyline_to_win_probability(opponent_moneyline)
+    else:
+        p_team_win = win_prob_from_spread(spread)
+        p_team_loss = 1 - p_team_win
 
     def ev(pick: Pick, p_correct: float) -> float:
         upset = is_upset_pick(
@@ -57,7 +78,7 @@ def choose_pick(
         return p_correct * mult - (1 - p_correct)
 
     win_ev = ev("WIN", p_team_win)
-    loss_ev = ev("LOSS", 1 - p_team_win)
+    loss_ev = ev("LOSS", p_team_loss)
 
     if win_ev >= loss_ev:
         is_upset = is_upset_pick(spread, "WIN", upset_threshold=upset_threshold, counts_favorite_loss=counts_favorite_loss)
@@ -68,7 +89,7 @@ def choose_pick(
         )
     is_upset = is_upset_pick(spread, "LOSS", upset_threshold=upset_threshold, counts_favorite_loss=counts_favorite_loss)
     return PickChoice(
-        pick="LOSS", win_probability=1 - p_team_win, is_upset=is_upset,
+        pick="LOSS", win_probability=p_team_loss, is_upset=is_upset,
         multiplier=upset_multiplier if is_upset else 1.0,
         ev_per_point=loss_ev, other_pick_ev_per_point=win_ev,
     )
@@ -137,7 +158,10 @@ def build_weekly_recommendations(
     counts_favorite_loss: bool = True,
     seed: Optional[int] = None,
 ) -> List[EntryRecommendation]:
-    """entries: list of {'name', 'current_points', 'spread'}. spread follows
+    """entries: list of {'name', 'current_points', 'spread'}, optionally
+    with 'team_moneyline'/'opponent_moneyline' (the assigned team's own
+    moneyline and its opponent's — see choose_pick, which prefers these
+    over the spread-derived model when both are present). spread follows
     scoring.spread_for_team's convention: positive = the entry's assigned
     team is an underdog by N, negative = favored by N, 0 = pick'em.
 
@@ -156,6 +180,7 @@ def build_weekly_recommendations(
         choice = choose_pick(
             e["spread"], upset_threshold=upset_threshold,
             upset_multiplier=upset_multiplier, counts_favorite_loss=counts_favorite_loss,
+            team_moneyline=e.get("team_moneyline"), opponent_moneyline=e.get("opponent_moneyline"),
         )
         choices.append(choice)
         size = recommend_bet_size(
@@ -178,10 +203,12 @@ def build_weekly_recommendations(
     out = []
     for e, size, choice, res in zip(entries, sizes, choices, sim_results):
         other_pick = "LOSS" if choice.pick == "WIN" else "WIN"
+        used_moneyline = e.get("team_moneyline") is not None and e.get("opponent_moneyline") is not None
+        prob_source = "moneyline" if used_moneyline else "spread"
         reasoning = (
             f"Recommended pick: {choice.pick}"
             + (" — qualifying 10x upset." if choice.is_upset else ".")
-            + f" Model win probability {choice.win_probability:.0%}; stake sized at "
+            + f" {prob_source.capitalize()}-derived win probability {choice.win_probability:.0%}; stake sized at "
             f"{size['fraction']*100:.0f}% of stack ({size['full_kelly']*100:.0f}% would be full "
             f"Kelly at this edge, scaled by the aggression setting — over 100% means this is "
             f"deliberately betting past full Kelly). "

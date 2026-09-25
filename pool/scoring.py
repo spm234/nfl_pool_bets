@@ -159,3 +159,13 @@ def infer_outcome_from_points(
     if pick == "LOSS":
         return other_side if correct else assigned_side
     return None
+
+
+def moneyline_to_win_probability(moneyline: float) -> float:
+    """American moneyline odds -> implied win probability (includes the
+    book's vig, so this slightly overstates true probability on both sides
+    of a game — a modeling approximation, not a precise figure).
+    """
+    if moneyline < 0:
+        return -moneyline / (-moneyline + 100)
+    return 100 / (moneyline + 100)
