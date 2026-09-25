@@ -180,9 +180,13 @@ API path wired into this tool for it):
 
 `.github/workflows/fetch-spreads.yml` is a click-to-run GitHub Action
 (Actions tab → "Fetch spreads" → "Run workflow", enter season/week) that
-fetches an early spread estimate for every game one of "my" entries is
-assigned to that week, and commits the updated `pool.db` back to the repo
-automatically — no local Python, no terminal.
+fetches an early spread estimate *and* current moneyline odds for every
+game one of "my" entries is assigned to that week, and commits the updated
+`pool.db` back to the repo automatically — no local Python, no terminal.
+The moneyline is informational only (`game.away_moneyline`/
+`home_moneyline`) — nothing in scoring/recommend derives from it, win
+probability comes from the spread. Either fetch can fail per-game (e.g. a
+game not listed yet) without blocking the other or skipping the commit.
 
 One-time setup:
 1. **Settings → Secrets and variables → Actions → New repository secret**,
@@ -198,9 +202,11 @@ already published to Pages. If you'd rather keep the database local-only,
 the alternative is running `fetch-my-spreads` (or `fetch-spread` for one
 game at a time) yourself, same as any other CLI command.
 
-`fetch-my-spreads --season Y --week N` (the command the Action runs) is
-also available locally — it fetches for every game any "my" entry is
-assigned to that week, without needing per-game `--away`/`--home` args.
+`fetch-my-spreads`/`fetch-my-moneylines --season Y --week N` (the commands
+the Action runs) are also available locally — each fetches for every game
+any "my" entry is assigned to that week, without needing per-game
+`--away`/`--home` args (`fetch-spread`/`fetch-moneyline` do one game at a
+time, same pattern as `record-result`).
 
 ## Fetching results the same way
 

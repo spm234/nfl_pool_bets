@@ -142,6 +142,63 @@ def test_save_spread_snapshot_never_overwrites_confirmed_game(conn):
     assert snapshots["n"] == 2
 
 
+def test_fetch_moneyline_estimate_parses_h2h_market(monkeypatch):
+    fake_requests = types.SimpleNamespace()
+
+    def fake_get(url, params=None, timeout=None):
+        assert params["markets"] == "h2h"
+        return _FakeResponse(
+            [
+                {
+                    "away_team": "Atlanta Falcons",
+                    "home_team": "Pittsburgh Steelers",
+                    "bookmakers": [
+                        {
+                            "markets": [
+                                {
+                                    "key": "h2h",
+                                    "outcomes": [
+                                        {"name": "Pittsburgh Steelers", "price": -150},
+                                        {"name": "Atlanta Falcons", "price": 130},
+                                    ],
+                                }
+                            ]
+                        }
+                    ],
+                }
+            ]
+        )
+
+    fake_requests.get = fake_get
+    fake_requests.RequestException = Exception
+    monkeypatch.setitem(sys.modules, "requests", fake_requests)
+
+    est = live_data.fetch_moneyline_estimate("Atlanta", "Pittsburgh", api_key="test-key")
+    assert est.away_moneyline == 130
+    assert est.home_moneyline == -150
+
+
+def test_fetch_moneyline_estimate_no_market_raises(monkeypatch):
+    fake_requests = types.SimpleNamespace(
+        get=lambda *a, **k: _FakeResponse(
+            [{"away_team": "Atlanta", "home_team": "Pittsburgh", "bookmakers": []}]
+        ),
+        RequestException=Exception,
+    )
+    monkeypatch.setitem(sys.modules, "requests", fake_requests)
+    with pytest.raises(live_data.LiveDataError, match="no moneyline"):
+        live_data.fetch_moneyline_estimate("Atlanta", "Pittsburgh", api_key="test-key")
+
+
+def test_save_moneyline_snapshot_updates_game(conn):
+    est = live_data.MoneylineEstimate(130, -150, "The Odds API, median of 3 books", "2026-09-09T00:00:00+00:00")
+    live_data.save_moneyline_snapshot(conn, 2026, 1, "Atlanta", "Pittsburgh", est)
+    game = conn.execute("SELECT away_moneyline, home_moneyline, moneyline_source FROM game").fetchone()
+    assert game["away_moneyline"] == 130
+    assert game["home_moneyline"] == -150
+    assert game["moneyline_source"] == "odds_api"
+
+
 def test_confirm_spread_is_authoritative_and_updates_game(conn):
     game_id = live_data.confirm_spread(
         conn, 2026, 1, "Atlanta", "Pittsburgh", "home", 10.0, "Cleveland Plain Dealer"

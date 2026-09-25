@@ -92,6 +92,14 @@ CREATE TABLE IF NOT EXISTS game (
     -- 'lookahead_sheet', or 'confirmed'. Informational only.
     spread_source   TEXT,
     outcome         TEXT CHECK (outcome IN ('home','away','tie') OR outcome IS NULL),
+    -- American moneyline odds, e.g. -150 or +130. Informational only —
+    -- nothing in scoring/recommend derives from these; win probability
+    -- comes from the spread (scoring.win_prob_from_spread). No sticky/
+    -- confirmed concept the way spreads have, since nothing here gates
+    -- upset qualification on a moneyline.
+    away_moneyline  INTEGER,
+    home_moneyline  INTEGER,
+    moneyline_source TEXT,
     UNIQUE(week_id, away_team, home_team)
 );
 

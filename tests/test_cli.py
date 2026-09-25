@@ -111,6 +111,50 @@ def test_fetch_my_spreads_fetches_only_my_games(db_path, monkeypatch, capsys):
     conn.close()
 
 
+def test_fetch_my_moneylines_fetches_only_my_games(db_path, monkeypatch, capsys):
+    _seed_my_assignment(db_path, 2026, 1, "Atlanta", "Pittsburgh")
+    conn = db.connect(db_path)
+    importer.import_schedule(conn, 2026, 1, "Buffalo, Houston\n")
+    importer.import_assignments(conn, 2026, 1, "Always Hot, Buffalo\n")
+    conn.close()
+
+    fetched = []
+
+    def fake_get(url, params=None, timeout=None):
+        fetched.append(params)
+        return _FakeResponse(
+            [
+                {
+                    "away_team": "Atlanta",
+                    "home_team": "Pittsburgh",
+                    "bookmakers": [
+                        {"markets": [{"key": "h2h", "outcomes": [
+                            {"name": "Pittsburgh", "price": -140},
+                            {"name": "Atlanta", "price": 120},
+                        ]}]}
+                    ],
+                }
+            ]
+        )
+
+    fake_requests = types.SimpleNamespace(get=fake_get, RequestException=Exception)
+    monkeypatch.setitem(sys.modules, "requests", fake_requests)
+
+    args = Namespace(db=str(db_path), season=2026, week=1, api_key="test-key")
+    cli.cmd_fetch_my_moneylines(args)
+
+    out = capsys.readouterr().out
+    assert "Atlanta +120 @ Pittsburgh -140" in out
+    assert "Buffalo @ Houston" not in out
+    assert fetched[0]["markets"] == "h2h"
+
+    conn = db.connect(db_path)
+    row = conn.execute("SELECT away_moneyline, home_moneyline FROM game WHERE away_team = 'Atlanta'").fetchone()
+    assert row["away_moneyline"] == 120
+    assert row["home_moneyline"] == -140
+    conn.close()
+
+
 def _fake_scores_get(events):
     def fake_get(url, params=None, timeout=None):
         return _FakeResponse(events)

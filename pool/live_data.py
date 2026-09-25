@@ -40,6 +40,14 @@ class SpreadEstimate:
 
 
 @dataclass
+class MoneylineEstimate:
+    away_moneyline: int  # American odds, e.g. -150 or +130
+    home_moneyline: int
+    source: str
+    fetched_at: str
+
+
+@dataclass
 class GameResult:
     outcome: str  # 'home' | 'away' | 'tie'
     home_score: int
@@ -161,6 +169,90 @@ def fetch_spread_estimate(
         )
     return SpreadEstimate(
         "away", median_home_point, f"The Odds API, median of {n_books} books", fetched_at
+    )
+
+
+def fetch_moneyline_estimate(
+    away_team: str, home_team: str, *, api_key: Optional[str] = None
+) -> MoneylineEstimate:
+    """Fetches current moneyline (h2h market) odds for one game from The
+    Odds API — informational only, same caveat as fetch_spread_estimate's
+    docstring about this never being authoritative for anything: nothing
+    in scoring/recommend derives win probability from a moneyline, that
+    comes from the spread. Requires the `requests` package and an API key
+    (from api_key or THE_ODDS_API_KEY).
+    """
+    try:
+        import requests
+    except ImportError as e:
+        raise LiveDataError(
+            "The 'requests' package is required for live moneyline fetching. "
+            "Install it with: pip install requests"
+        ) from e
+
+    key = api_key or os.environ.get("THE_ODDS_API_KEY")
+    if not key:
+        raise LiveDataError(
+            "No API key found. Set THE_ODDS_API_KEY or pass api_key= explicitly. "
+            "Sign up at https://the-odds-api.com for a free-tier key."
+        )
+
+    try:
+        resp = requests.get(
+            ODDS_API_BASE,
+            params={
+                "apiKey": key,
+                "regions": "us",
+                "markets": "h2h",
+                "oddsFormat": "american",
+            },
+            timeout=15,
+        )
+        resp.raise_for_status()
+        events = resp.json()
+    except requests.RequestException as e:
+        raise LiveDataError(f"Request to The Odds API failed: {e}") from e
+
+    away_n, home_n = _normalize(away_team), _normalize(home_team)
+    match = None
+    for event in events:
+        if _normalize(_to_short_name(event.get("away_team", ""))) == away_n and _normalize(
+            _to_short_name(event.get("home_team", ""))
+        ) == home_n:
+            match = event
+            break
+    if match is None:
+        raise LiveDataError(
+            f"No current odds found for {away_team} @ {home_team}. "
+            "Check team-name spelling matches The Odds API's naming, or the "
+            "game may not be listed yet."
+        )
+
+    away_prices: List[float] = []
+    home_prices: List[float] = []
+    for bookmaker in match.get("bookmakers", []):
+        for market in bookmaker.get("markets", []):
+            if market.get("key") != "h2h":
+                continue
+            for outcome in market.get("outcomes", []):
+                name = _normalize(_to_short_name(outcome.get("name", "")))
+                if name == away_n:
+                    away_prices.append(float(outcome["price"]))
+                elif name == home_n:
+                    home_prices.append(float(outcome["price"]))
+
+    if not away_prices or not home_prices:
+        raise LiveDataError(
+            f"Odds data found for {away_team} @ {home_team} but no moneyline (h2h) market present."
+        )
+
+    fetched_at = datetime.now(timezone.utc).isoformat()
+    n_books = min(len(away_prices), len(home_prices))
+    return MoneylineEstimate(
+        away_moneyline=round(statistics.median(away_prices)),
+        home_moneyline=round(statistics.median(home_prices)),
+        source=f"The Odds API, median of {n_books} books",
+        fetched_at=fetched_at,
     )
 
 
@@ -324,6 +416,29 @@ def save_spread_snapshot(
         )
     conn.commit()
     return cur.lastrowid
+
+
+def save_moneyline_snapshot(
+    conn: sqlite3.Connection,
+    season_year: int,
+    week_number: int,
+    away_team: str,
+    home_team: str,
+    estimate: MoneylineEstimate,
+) -> int:
+    """Writes the moneyline straight to game.away_moneyline/home_moneyline
+    — informational only, no confirmed/sticky concept the way spreads have
+    (nothing gates upset qualification on a moneyline), so this always
+    just overwrites with the latest fetch.
+    """
+    week_id = db.get_or_create_week(conn, season_year, week_number)
+    game_id = db.get_or_create_game(conn, week_id, away_team, home_team)
+    conn.execute(
+        "UPDATE game SET away_moneyline = ?, home_moneyline = ?, moneyline_source = 'odds_api' WHERE id = ?",
+        (estimate.away_moneyline, estimate.home_moneyline, game_id),
+    )
+    conn.commit()
+    return game_id
 
 
 def confirm_spread(

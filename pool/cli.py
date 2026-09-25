@@ -401,6 +401,62 @@ def cmd_fetch_my_spreads(args):
         sys.exit(1)
 
 
+def cmd_fetch_moneyline(args):
+    conn = db.connect(args.db)
+    try:
+        estimate = live_data.fetch_moneyline_estimate(args.away, args.home, api_key=args.api_key)
+    except live_data.LiveDataError as e:
+        print(f"Could not fetch a live moneyline: {e}", file=sys.stderr)
+        sys.exit(1)
+    live_data.save_moneyline_snapshot(conn, args.season, args.week, args.away, args.home, estimate)
+    print(
+        f"{args.away} {estimate.away_moneyline:+d} @ {args.home} {estimate.home_moneyline:+d} "
+        f"[{estimate.source}] (informational only)"
+    )
+    conn.close()
+
+
+def cmd_fetch_my_moneylines(args):
+    """Fetches current moneyline odds for every game one of 'my' entries is
+    assigned to this week — same shape as fetch-my-spreads. Informational
+    only: nothing in scoring/recommend derives from a moneyline.
+    """
+    conn = db.connect(args.db)
+    games = conn.execute(
+        """
+        SELECT DISTINCT g.away_team, g.home_team
+        FROM assignment a
+        JOIN entry e ON e.id = a.entry_id
+        JOIN game g ON g.id = a.game_id
+        WHERE e.is_mine = 1 AND g.week_id = (
+            SELECT id FROM week WHERE season_year = ? AND week_number = ?
+        )
+        """,
+        (args.season, args.week),
+    ).fetchall()
+
+    if not games:
+        print(f"No assignments logged for any of my entries in week {args.week} yet — nothing to fetch.")
+        conn.close()
+        return
+
+    failures = 0
+    for g in games:
+        away, home = g["away_team"], g["home_team"]
+        try:
+            estimate = live_data.fetch_moneyline_estimate(away, home, api_key=args.api_key)
+        except live_data.LiveDataError as e:
+            print(f"  {away} @ {home}: could not fetch ({e})", file=sys.stderr)
+            failures += 1
+            continue
+        live_data.save_moneyline_snapshot(conn, args.season, args.week, away, home, estimate)
+        print(f"  {away} {estimate.away_moneyline:+d} @ {home} {estimate.home_moneyline:+d} [{estimate.source}]")
+
+    conn.close()
+    if failures:
+        sys.exit(1)
+
+
 def cmd_confirm_spread(args):
     conn = db.connect(args.db)
     cfg = PoolConfig.load(conn)
@@ -779,6 +835,28 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--week", type=int, required=True)
     sp.add_argument("--api-key", default=None)
     sp.set_defaults(func=cmd_fetch_my_spreads)
+
+    sp = sub.add_parser(
+        "fetch-moneyline",
+        help="Fetch a live moneyline (h2h) estimate for one game — informational only, "
+        "nothing in scoring/recommend derives from it",
+    )
+    sp.add_argument("--season", type=int, required=True)
+    sp.add_argument("--week", type=int, required=True)
+    sp.add_argument("--away", required=True)
+    sp.add_argument("--home", required=True)
+    sp.add_argument("--api-key", default=None)
+    sp.set_defaults(func=cmd_fetch_moneyline)
+
+    sp = sub.add_parser(
+        "fetch-my-moneylines",
+        help="Fetch current moneyline odds for every game any 'my' entry is assigned to "
+        "this week, same shape as fetch-my-spreads — informational only",
+    )
+    sp.add_argument("--season", type=int, required=True)
+    sp.add_argument("--week", type=int, required=True)
+    sp.add_argument("--api-key", default=None)
+    sp.set_defaults(func=cmd_fetch_my_moneylines)
 
     sp = sub.add_parser("confirm-spread", help="Record a manually-confirmed, authoritative spread")
     sp.add_argument("--season", type=int, required=True)

@@ -19,6 +19,9 @@ _MIGRATIONS = [
     ("pool_config", "sim_p_upset_freq", "REAL NOT NULL DEFAULT 0.20"),
     ("pool_config", "sim_p_upset_win", "REAL NOT NULL DEFAULT 0.22"),
     ("pool_config", "recommend_aggression", "REAL NOT NULL DEFAULT 50"),
+    ("game", "away_moneyline", "INTEGER"),
+    ("game", "home_moneyline", "INTEGER"),
+    ("game", "moneyline_source", "TEXT"),
 ]
 
 
