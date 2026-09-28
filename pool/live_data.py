@@ -256,21 +256,15 @@ def fetch_moneyline_estimate(
     )
 
 
-def fetch_completed_score(
-    away_team: str, home_team: str, *, api_key: Optional[str] = None, days_from: int = 3
-) -> GameResult:
-    """Fetches a completed game's final score from The Odds API's /scores
-    endpoint and returns the settled outcome.
-
-    Caveat: this endpoint reports only the final score (after any overtime),
-    not the score at the end of regulation. The pool's rule is that a game
-    tied at the end of regulation scores as a loss for any WIN/LOSS pick
-    regardless of who wins in OT — that distinction can't be recovered from
-    a final-score-only source. It's a non-issue when the final score is
-    tied (that can only happen if regulation was also tied), but a decisive
-    final score here is reported as a normal win/loss even if the game
-    actually went to overtime from a regulation tie; callers should surface
-    that caveat rather than treat a decisive result as unconditionally safe.
+def _fetch_scores_events(api_key: Optional[str], days_from: int) -> list:
+    """One HTTP round trip to The Odds API's /scores endpoint, returning
+    every game in the window — the endpoint isn't scoped to a single game,
+    so this is shared by fetch_completed_score (single game) and
+    sync_pending_results (which reuses one fetch across every pending game
+    instead of re-requesting the identical payload once per game — that
+    per-game re-fetch is what was silently burning through a free-tier
+    key's monthly quota, since a single sync could involve hundreds of
+    still-not-played future-week games).
     """
     try:
         import requests
@@ -294,10 +288,18 @@ def fetch_completed_score(
             timeout=15,
         )
         resp.raise_for_status()
-        events = resp.json()
+        return resp.json()
     except requests.RequestException as e:
         raise LiveDataError(f"Request to The Odds API failed: {e}") from e
 
+
+def _match_score_event(
+    events: list, away_team: str, home_team: str, days_from: int
+) -> GameResult:
+    """Finds and parses one game's result out of an already-fetched
+    /scores event list — see fetch_completed_score's docstring for the
+    OT/regulation-tie caveat, which applies here identically.
+    """
     away_n, home_n = _normalize(away_team), _normalize(home_team)
     match = None
     for event in events:
@@ -337,6 +339,26 @@ def fetch_completed_score(
     )
 
 
+def fetch_completed_score(
+    away_team: str, home_team: str, *, api_key: Optional[str] = None, days_from: int = 3
+) -> GameResult:
+    """Fetches a completed game's final score from The Odds API's /scores
+    endpoint and returns the settled outcome.
+
+    Caveat: this endpoint reports only the final score (after any overtime),
+    not the score at the end of regulation. The pool's rule is that a game
+    tied at the end of regulation scores as a loss for any WIN/LOSS pick
+    regardless of who wins in OT — that distinction can't be recovered from
+    a final-score-only source. It's a non-issue when the final score is
+    tied (that can only happen if regulation was also tied), but a decisive
+    final score here is reported as a normal win/loss even if the game
+    actually went to overtime from a regulation tie; callers should surface
+    that caveat rather than treat a decisive result as unconditionally safe.
+    """
+    events = _fetch_scores_events(api_key, days_from)
+    return _match_score_event(events, away_team, home_team, days_from)
+
+
 def sync_pending_results(
     conn: sqlite3.Connection, *, api_key: Optional[str] = None, days_from: int = 3
 ) -> List[ResultSyncOutcome]:
@@ -351,6 +373,15 @@ def sync_pending_results(
     normal mid-week case. Standings computed live from game.outcome (e.g.
     compute_my_entry_timeline) reflect a recorded result immediately, with
     no separate settle step needed.
+
+    Fetches the /scores window exactly ONCE for the whole call, not once
+    per pending game -- every game still missing an outcome (including
+    future weeks that haven't been played yet) shares that single fetch.
+    Previously this called fetch_completed_score per game, so a database
+    with a couple hundred not-yet-played games queued up the same number
+    of near-identical API requests every run; against a free-tier key's
+    monthly quota that's how a handful of daily syncs turns into 401/429
+    errors on everything.
     """
     from . import importer
 
@@ -365,11 +396,22 @@ def sync_pending_results(
     ).fetchall()
 
     out: List[ResultSyncOutcome] = []
+    if not games:
+        return out
+
+    try:
+        events = _fetch_scores_events(api_key, days_from)
+    except LiveDataError as e:
+        return [
+            ResultSyncOutcome(g["season_year"], g["week_number"], g["away_team"], g["home_team"], error=str(e))
+            for g in games
+        ]
+
     for g in games:
         away, home = g["away_team"], g["home_team"]
         season_year, week_number = g["season_year"], g["week_number"]
         try:
-            result = fetch_completed_score(away, home, api_key=api_key, days_from=days_from)
+            result = _match_score_event(events, away, home, days_from)
         except LiveDataError as e:
             out.append(ResultSyncOutcome(season_year, week_number, away, home, error=str(e)))
             continue

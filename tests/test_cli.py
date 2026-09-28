@@ -298,6 +298,30 @@ def test_sync_results_finds_completed_games_across_weeks_without_season_or_week_
     conn.close()
 
 
+def test_sync_results_fetches_scores_once_regardless_of_pending_game_count(db_path, monkeypatch):
+    # The actual bug: this used to call the /scores endpoint once PER
+    # pending game (previously fetch_completed_score per game), so a
+    # database with many not-yet-played future-week games burned through a
+    # free-tier key's monthly quota in a single sync run. One fetch, reused
+    # for every game, regardless of how many are pending.
+    conn = db.connect(db_path)
+    for week in range(1, 6):
+        importer.import_schedule(conn, 2026, week, f"Team{week}A, Team{week}B\n")
+    conn.close()
+
+    calls = []
+
+    def fake_get(url, params=None, timeout=None):
+        calls.append(params)
+        return _FakeResponse([])
+
+    monkeypatch.setitem(sys.modules, "requests", types.SimpleNamespace(get=fake_get, RequestException=Exception))
+
+    args = Namespace(db=str(db_path), api_key="test-key", days_from=3)
+    cli.cmd_sync_results(args)
+    assert len(calls) == 1  # 5 pending games, one fetch
+
+
 def test_sync_results_skips_games_already_settled(db_path, monkeypatch, capsys):
     conn = db.connect(db_path)
     importer.import_schedule(conn, 2026, 1, "Atlanta, Pittsburgh\n")
